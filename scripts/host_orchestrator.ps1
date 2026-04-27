@@ -64,17 +64,21 @@ foreach ($name in @("guest_preflight.py", "guest_gui_runner.py", "requirements-g
   Invoke-Vmrun -gu $GuestUser -gp $GuestPassword copyFileFromHostToGuest $Vmx (Join-Path $HostSkillDir "scripts\$name") (Join-Path $guestScripts $name)
 }
 
-Invoke-Vmrun -gu $GuestUser -gp $GuestPassword copyFileFromHostToGuest $Vmx $HostPlanJson (Join-Path $GuestWorkDir "plan.json")
-
 # Plain runProgramInGuest is acceptable for preflight import checks, but GUI
 # evidence capture should be launched from an interactive scheduled task.
 Invoke-Guest $GuestPython @((Join-Path $guestScripts "guest_preflight.py"))
 
 $guestEvidence = Join-Path $GuestWorkDir "evidence"
+$guestTmp = Join-Path $guestEvidence "tmp"
+Invoke-Guest "cmd.exe" @("/c", "mkdir `"$guestTmp`" 2>nul")
+
+$guestPlanJson = Join-Path $guestTmp "plan.json"
+Invoke-Vmrun -gu $GuestUser -gp $GuestPassword copyFileFromHostToGuest $Vmx $HostPlanJson $guestPlanJson
+
 $runner = Join-Path $guestScripts "guest_gui_runner.py"
-$resultJson = Join-Path $GuestWorkDir "runner_result.json"
-$keepTmpArg = if ($KeepTmp) { " --keep-tmp" } else { "" }
-$taskCommand = "`"$GuestPython`" `"$runner`" --plan `"$GuestWorkDir\plan.json`" --out-dir `"$guestEvidence`" --result-json `"$resultJson`"$keepTmpArg"
+$resultJson = Join-Path $guestTmp "runner_result.json"
+# The host reads tmp JSON after the scheduled task finishes, then removes tmp.
+$taskCommand = "`"$GuestPython`" `"$runner`" --plan `"$guestPlanJson`" --out-dir `"$guestEvidence`" --result-json `"$resultJson`" --keep-tmp"
 
 Invoke-Guest "schtasks.exe" @("/Create", "/F", "/TN", $TaskName, "/SC", "ONCE", "/ST", "23:59", "/RL", "HIGHEST", "/TR", $taskCommand)
 Invoke-Guest "schtasks.exe" @("/Run", "/TN", $TaskName)

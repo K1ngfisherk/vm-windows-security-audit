@@ -56,7 +56,7 @@ If any required path or credential is missing and cannot be inferred, ask one co
    - For unmatched checks, use the adaptive GUI rules in `references/gui_adaptive_rules.md`.
    - Screenshot each row as `rowNN_<tool>_<check_key>.png`.
    - Put only final accepted screenshots in the evidence directory root.
-   - Put runner logs, stdout/stderr captures, visible-command helper scripts, validation JSON, contact sheets, and diagnostic/error screenshots in `evidence/tmp`.
+   - Put runner logs, stdout/stderr captures, visible-command helper scripts, runtime JSON files, validation JSON, contact sheets, and diagnostic/error screenshots in `evidence/tmp`.
 
 5. Verify evidence:
    - Check that the screenshot is not blank.
@@ -68,6 +68,7 @@ If any required path or credential is missing and cannot be inferred, ask one co
    - Screenshots are always saved when checks run.
    - The final evidence directory root must contain final screenshots only.
    - Delete `evidence/tmp` at task completion unless the user explicitly asks to keep diagnostics for troubleshooting.
+   - Do not place runtime JSON files such as `plan.json`, `runner_result.json`, or `image_validation.json` in the evidence root or guest work root; stage them under `evidence/tmp` and clean them with the rest of tmp.
    - Only write Excel when requested.
    - For embedded-image output, prefer `scripts/workbook_embed_excel_com.ps1` on Windows hosts with Excel installed; insert screenshots directly into the detected `检查情况` column and remove filename/link wording.
 
@@ -80,7 +81,7 @@ Use sibling outputs next to the source workbook unless the user specifies otherw
 - Plan: `Windows完整检查_<task_label>_执行计划.json`
 
 Do not add timestamps or nested final-evidence folders to final output names unless the user asks.
-Do not leave intermediate files in the final evidence directory. Use `Windows完整检查_<task_label>_证据/tmp` only as a temporary staging area, then remove it when the run is complete.
+Do not leave intermediate files in the final evidence directory. Use `Windows完整检查_<task_label>_证据/tmp` only as a temporary staging area for logs, helper scripts, diagnostic screenshots, and runtime JSON files, then remove it when the run is complete.
 
 ## Matching And Adaptation
 
@@ -111,6 +112,8 @@ Critical inherited rules:
 
 ## Scripts
 
+- `scripts/*.py` are internal workflow components. Do not present them as user-facing commands and do not ask the user to invoke them directly.
+- The skill workflow or `scripts/host_orchestrator.ps1` owns Python invocation, including guest-side scheduled-task execution.
 - `scripts/analyze_checklist.py`: detect workbook columns and create the execution plan.
 - `scripts/guest_preflight.py`: verify guest Python, PyAutoGUI, screenshot, and display context.
 - `scripts/guest_setup_pyautogui.ps1`: detect or install guest Python, then install PyAutoGUI dependencies.
@@ -141,5 +144,5 @@ Before final response:
 - Evidence filenames follow the row naming contract.
 - Workbook output, if requested, is a copied workbook and not the original.
 - Embedded-image output has no `截图:`, `证据:`, `rowNN_`, or hyperlink remnants in the check-result cells.
-- The final evidence directory contains only accepted final screenshots; no `tmp` directory, runner logs, stdout/stderr text, validation JSON, contact sheets, or helper scripts remain unless diagnostics were explicitly kept.
+- The final evidence directory contains only accepted final screenshots; no `tmp` directory, runner logs, stdout/stderr text, runtime JSON files, validation JSON, contact sheets, or helper scripts remain unless diagnostics were explicitly kept.
 - Report whether any rows were adaptive, unsupported, or manually confirmed.

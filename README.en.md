@@ -24,6 +24,8 @@ vmrun + VMware Tools + guest-side PyAutoGUI + Excel
 
 VMware MCP can be used as an optional helper, but it is not required.
 
+`scripts/*.py` files are internal workflow components, not user-facing entry points. Run audits through the skill workflow or `scripts/host_orchestrator.ps1`; the workflow invokes Python scripts on its own.
+
 ## Layout
 
 ```text
@@ -104,7 +106,7 @@ Screenshot names:
 rowNN_<tool>_<check_key>.png
 ```
 
-The final evidence directory root should contain accepted final screenshots only. Logs, stdout/stderr captures, runner results, validation JSON, contact sheets, temporary scripts, and diagnostic error screenshots must go under `Windows完整检查_<task_label>_证据/tmp`, and that `tmp` directory is deleted by default when the task completes.
+The final evidence directory root should contain accepted final screenshots only. Logs, stdout/stderr captures, runtime JSON files such as `plan.json`, `runner_result.json`, and `image_validation.json`, contact sheets, temporary scripts, and diagnostic error screenshots must go under `Windows完整检查_<task_label>_证据/tmp`, and that `tmp` directory is deleted by default when the task completes.
 
 Installed-update evidence must land on the actual `Installed Updates` page and show the Windows update/KB list area. Do not accept the plain installed-programs list as patch-location evidence.
 

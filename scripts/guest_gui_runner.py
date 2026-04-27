@@ -623,6 +623,13 @@ def main() -> None:
     parser.add_argument("--keep-tmp", action="store_true", help="Keep out-dir/tmp diagnostics after the run.")
     args = parser.parse_args()
 
+    if args.result_json:
+        tmp_dir = args.out_dir / "tmp"
+        if not path_is_under(args.result_json, tmp_dir):
+            parser.error("--result-json must be written under --out-dir/tmp; use stdout for non-file results.")
+        if not args.keep_tmp:
+            parser.error("--result-json lives under --out-dir/tmp; use --keep-tmp and let the caller clean tmp after reading it.")
+
     result = run_plan(args.plan, args.out_dir, args.only_row, args.debug)
     if args.result_json:
         args.result_json.parent.mkdir(parents=True, exist_ok=True)
