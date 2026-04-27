@@ -1,0 +1,225 @@
+[
+  {
+    "id": "identity_users",
+    "match": {
+      "any": ["身份标识", "口令鉴别", "空密码", "登录验证"]
+    },
+    "tool": "cmd",
+    "gui_action": "identity_users",
+    "evidence_slug": "identity_users",
+    "graphical_required": true,
+    "notes": "Show the logged-in account and local user list or equivalent graphical/visible proof."
+  },
+  {
+    "id": "password_policy",
+    "match": {
+      "any": ["密码策略", "复杂度", "最小长度", "最短使用期限", "最长使用期限", "强制密码历史", "可还原"]
+    },
+    "tool": "secpol.msc",
+    "gui_action": "secpol_password_policy",
+    "evidence_slug": "secpol_password_policy",
+    "graphical_required": true,
+    "navigation": "Account Policies > Password Policy"
+  },
+  {
+    "id": "account_lockout_policy",
+    "match": {
+      "any": ["账户锁定", "登录失败", "非法登录", "锁定阈值", "重置账户锁定计数器"]
+    },
+    "tool": "secpol.msc",
+    "gui_action": "secpol_account_lockout_policy",
+    "evidence_slug": "secpol_account_lockout_policy",
+    "graphical_required": true,
+    "navigation": "Account Policies > Account Lockout Policy"
+  },
+  {
+    "id": "rdp_encryption_level",
+    "match": {
+      "any": ["远程管理", "加密级别", "RDP", "RDP-Tcp", "终端服务", "远程桌面", "FIPS"]
+    },
+    "tool": "gpedit.msc",
+    "gui_action": "gpedit_rdp_client_connection_encryption_level",
+    "evidence_slug": "gpedit_rdp_client_connection_encryption_level",
+    "graphical_required": true,
+    "navigation": "Computer Configuration > Administrative Templates > Windows Components > Remote Desktop Services > Remote Desktop Session Host > Security",
+    "notes": "Evaluate the graphical client connection encryption level policy only when this policy page is visible."
+  },
+  {
+    "id": "unique_usernames",
+    "match": {
+      "any": ["不同用户", "不同用户名", "用户名具有唯一性", "重复用户名"]
+    },
+    "tool": "lusrmgr.msc",
+    "gui_action": "lusrmgr_users",
+    "evidence_slug": "lusrmgr_users",
+    "graphical_required": true,
+    "navigation": "Users"
+  },
+  {
+    "id": "admin_auth_method",
+    "match": {
+      "any": ["组合的鉴别技术", "两种或两种以上", "管理用户", "身份鉴别"]
+    },
+    "tool": "cmd",
+    "gui_action": "admin_auth_method",
+    "evidence_slug": "admin_auth_method",
+    "graphical_required": false,
+    "notes": "If the row is interview-only, collect visible session/account proof and state the limitation."
+  },
+  {
+    "id": "default_shares",
+    "match": {
+      "any": ["默认共享", "共享文件夹", "ADMIN$", "IPC$", "C$"]
+    },
+    "tool": "fsmgmt.msc",
+    "gui_action": "fsmgmt_shares",
+    "evidence_slug": "fsmgmt_shares",
+    "graphical_required": true,
+    "navigation": "Shared Folders > Shares"
+  },
+  {
+    "id": "restrict_anonymous",
+    "match": {
+      "any": ["ipc$空连接", "restrictanonymous", "空连接", "枚举"]
+    },
+    "tool": "regedit",
+    "gui_action": "regedit_lsa_restrictanonymous",
+    "evidence_slug": "regedit_lsa_restrictanonymous",
+    "graphical_required": true,
+    "navigation": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa"
+  },
+  {
+    "id": "privilege_separation",
+    "match": {
+      "any": ["特权用户", "权限分离", "数据库", "操作系统", "权限过大"]
+    },
+    "tool": "lusrmgr.msc;services.msc",
+    "gui_action": "privilege_separation",
+    "evidence_slug": "lusrmgr_administrators_members",
+    "extra_evidence_slugs": ["services_mysql_logon_account"],
+    "graphical_required": true,
+    "notes": "Capture local Administrators group membership and relevant database service Log On account when present."
+  },
+  {
+    "id": "default_accounts",
+    "match": {
+      "any": ["默认帐户", "默认账户", "Administrator", "administrator", "guest", "Guest", "来宾", "重命名", "禁用"]
+    },
+    "tool": "lusrmgr.msc",
+    "gui_action": "lusrmgr_default_accounts",
+    "evidence_slug": "lusrmgr_default_accounts",
+    "extra_evidence_slugs": ["lusrmgr_guest_properties_disabled"],
+    "graphical_required": true,
+    "notes": "Click Guest and open properties if the requirement asks whether Guest is disabled."
+  },
+  {
+    "id": "extra_accounts",
+    "match": {
+      "any": ["多余", "过期", "删除", "无关的账号", "无关的账户"]
+    },
+    "tool": "lusrmgr.msc",
+    "gui_action": "lusrmgr_extra_accounts",
+    "evidence_slug": "lusrmgr_extra_accounts",
+    "graphical_required": true
+  },
+  {
+    "id": "audit_policy",
+    "match": {
+      "any": ["审核策略", "审计功能", "审核登录", "审核对象访问", "审核策略更改", "审核帐户"]
+    },
+    "tool": "secpol.msc",
+    "gui_action": "secpol_audit_policy",
+    "evidence_slug": "secpol_audit_policy",
+    "graphical_required": true,
+    "navigation": "Local Policies > Audit Policy"
+  },
+  {
+    "id": "event_log_details",
+    "match": {
+      "any": ["日志记录", "事件的日期", "时间", "类型", "主体标识", "客体标识", "结果"]
+    },
+    "tool": "eventvwr.msc",
+    "gui_action": "eventvwr_system_log",
+    "evidence_slug": "eventvwr_system_log",
+    "graphical_required": true,
+    "navigation": "Windows Logs > System"
+  },
+  {
+    "id": "event_log_size_retention",
+    "match": {
+      "any": ["日志记录缓存", "达到上限", "覆盖规则", "最大大小", "20480"]
+    },
+    "tool": "eventvwr.msc",
+    "gui_action": "eventvwr_system_log_properties",
+    "evidence_slug": "eventvwr_system_log_properties",
+    "graphical_required": true,
+    "navigation": "Windows Logs > System > Properties"
+  },
+  {
+    "id": "installed_updates",
+    "match": {
+      "any": ["系统补丁", "补丁版本", "已安装更新", "更新到最近", "KB"]
+    },
+    "tool": "control",
+    "gui_action": "control_installed_updates",
+    "evidence_slug": "control_installed_updates",
+    "graphical_required": true,
+    "navigation": "Programs and Features > Installed Updates"
+  },
+  {
+    "id": "unnecessary_services",
+    "match": {
+      "any": ["不必要的服务", "Remote Registry", "Task Scheduler", "Messenger", "Alerter", "正在运行的服务"]
+    },
+    "tool": "services.msc",
+    "gui_action": "services_remote_registry",
+    "evidence_slug": "services_remote_registry",
+    "graphical_required": true
+  },
+  {
+    "id": "idle_session_limit",
+    "match": {
+      "any": ["操作超时", "超时锁定", "空闲", "会话时间限制", "300秒"]
+    },
+    "tool": "gpedit.msc",
+    "gui_action": "gpedit_idle_session_limit",
+    "evidence_slug": "gpedit_idle_session_limit",
+    "graphical_required": true,
+    "navigation": "Computer Configuration > Administrative Templates > Windows Components > Remote Desktop Services > Remote Desktop Session Host > Session Time Limits"
+  },
+  {
+    "id": "limit_connections",
+    "match": {
+      "any": ["限制终端连接", "终端连接数量", "限制连接的数量", "连接数量为5"]
+    },
+    "tool": "gpedit.msc",
+    "gui_action": "gpedit_limit_number_of_connections",
+    "evidence_slug": "gpedit_limit_number_of_connections",
+    "graphical_required": true,
+    "navigation": "Computer Configuration > Administrative Templates > Windows Components > Remote Desktop Services > Remote Desktop Session Host > Connections"
+  },
+  {
+    "id": "dont_display_last_username",
+    "match": {
+      "any": ["不显示上次", "最后的用户名", "上次的用户登录名", "交互式登录"]
+    },
+    "tool": "secpol.msc",
+    "gui_action": "secpol_security_options",
+    "evidence_slug": "secpol_security_options",
+    "graphical_required": true,
+    "navigation": "Local Policies > Security Options",
+    "notes": "Use the graphical Security Options page; avoid registry fallback when visible."
+  },
+  {
+    "id": "clear_virtual_memory_pagefile",
+    "match": {
+      "any": ["虚拟内存页面", "页面文件", "关机", "清除虚拟内存"]
+    },
+    "tool": "secpol.msc",
+    "gui_action": "secpol_security_options",
+    "evidence_slug": "secpol_security_options",
+    "graphical_required": true,
+    "navigation": "Local Policies > Security Options",
+    "notes": "Use the graphical Security Options page; avoid registry fallback when visible."
+  }
+]

@@ -1,0 +1,68 @@
+{
+  "bundle": "vm-windows-security-audit offline guest python environment",
+  "python": "3.9.13 x64",
+  "platform": "Windows x64",
+  "generated_at": "2026-04-27T21:49:25",
+  "files": [
+    {
+      "path": "install_guest_offline.ps1",
+      "size": 851,
+      "sha256": "AA9FFB49D7CA663FD531DA4F83C75ACB9CA4EB5075A165ACA9E60189638A2726"
+    },
+    {
+      "path": "python-3.9.13-amd64.exe",
+      "size": 29235432,
+      "sha256": "FB3D0466F3754752CA7FD839A09FFE53375FF2C981279FD4BC23A005458F7F5D"
+    },
+    {
+      "path": "requirements-guest-py39.txt",
+      "size": 152,
+      "sha256": "E077B182A1A64EE2B21ECF90E6EDE4FFEC0EBA96A93D247FCAC95201B1E6459D"
+    },
+    {
+      "path": "wheelhouse/mouseinfo-0.1.3-py3-none-any.whl",
+      "size": 10966,
+      "sha256": "826FF0C72A3C2BCA4D48C6DB802AE9F4FDA48B145D6F80B4D765296CE1525821"
+    },
+    {
+      "path": "wheelhouse/pillow-10.4.0-cp39-cp39-win_amd64.whl",
+      "size": 2554479,
+      "sha256": "961A7293B2457B405967AF9C77DCAA43CC1A8CD50D23C532E62D48AB6CDD56F5"
+    },
+    {
+      "path": "wheelhouse/pyautogui-0.9.54-py3-none-any.whl",
+      "size": 37707,
+      "sha256": "08C615E2D69DA005917510C5F53840B282C05B39777F5A91B367F11D16AE3DBE"
+    },
+    {
+      "path": "wheelhouse/pygetwindow-0.0.9-py3-none-any.whl",
+      "size": 11134,
+      "sha256": "54D4432AEF398CD087F935915B4FDD5C49D2403837423B9C0BCC47DF427DD332"
+    },
+    {
+      "path": "wheelhouse/pymsgbox-1.0.9-py3-none-any.whl",
+      "size": 7466,
+      "sha256": "1F91F991C6791B637D625D3D45C4389B1EDC231A16D8255A6AC22C3D367E7751"
+    },
+    {
+      "path": "wheelhouse/pyperclip-1.9.0-py3-none-any.whl",
+      "size": 11115,
+      "sha256": "5D8298AB19DB4D742C36BDC7AC9B1DE05AFF8764180E52D9FEF05C00F0706CB4"
+    },
+    {
+      "path": "wheelhouse/pyrect-0.2.0-py2.py3-none-any.whl",
+      "size": 11304,
+      "sha256": "E8B3A771F15820C60FA1E823FF0D0084DD2E9C591B97C3980EA4EF6254A9DC62"
+    },
+    {
+      "path": "wheelhouse/pyscreeze-0.1.30-py3-none-any.whl",
+      "size": 14499,
+      "sha256": "CE5F07577504A493CCB31C35E05B89FA720C1C80F68ECC01C89FF2F59F3903DE"
+    },
+    {
+      "path": "wheelhouse/pytweening-1.2.0-py3-none-any.whl",
+      "size": 8134,
+      "sha256": "9B0682F9270858A3845870508DC579D99CA9C17B7345314D75A66A997B61E461"
+    }
+  ]
+}

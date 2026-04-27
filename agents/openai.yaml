@@ -1,0 +1,7 @@
+interface:
+  display_name: "VM Windows Security Audit"
+  short_description: "Audit VMware Windows VMs with GUI evidence"
+  brand_color: "#2563EB"
+  default_prompt: "Use $vm-windows-security-audit to audit this VMware Windows VM against my checklist and collect GUI screenshot evidence."
+policy:
+  allow_implicit_invocation: true

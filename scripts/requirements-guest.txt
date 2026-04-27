@@ -1,0 +1,4 @@
+pyautogui
+pillow
+pyperclip
+pygetwindow
