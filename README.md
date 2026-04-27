@@ -104,6 +104,10 @@ Windows完整检查_<task_label>_执行计划.json
 rowNN_<tool>_<check_key>.png
 ```
 
+最终证据目录根目录只保留已验收的最终截图。运行日志、stdout/stderr、runner 结果、校验 JSON、联系表、临时脚本和错误诊断截图必须进入 `Windows完整检查_<task_label>_证据/tmp`，任务完成后默认删除该 `tmp` 目录。
+
+已安装补丁检查的最终截图必须停留在“已安装更新”页面，并能看到 Windows 更新/KB 列表区域，不能只截“卸载或更改程序”的软件列表页。
+
 ## 说明
 
 - 生成 workbook、超链接、压缩包都是可选行为，只在需要时执行。

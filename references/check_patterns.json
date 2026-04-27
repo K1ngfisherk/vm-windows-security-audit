@@ -164,7 +164,8 @@
     "gui_action": "control_installed_updates",
     "evidence_slug": "control_installed_updates",
     "graphical_required": true,
-    "navigation": "Programs and Features > Installed Updates"
+    "navigation": "Programs and Features > Installed Updates",
+    "notes": "Final evidence must show the Installed Updates page title/breadcrumb and Windows update/KB list area, not the installed-programs list."
   },
   {
     "id": "unnecessary_services",

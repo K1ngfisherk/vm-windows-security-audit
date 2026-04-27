@@ -55,14 +55,19 @@ If any required path or credential is missing and cannot be inferred, ask one co
    - For inferred checks, open the tool named or implied by the row.
    - For unmatched checks, use the adaptive GUI rules in `references/gui_adaptive_rules.md`.
    - Screenshot each row as `rowNN_<tool>_<check_key>.png`.
+   - Put only final accepted screenshots in the evidence directory root.
+   - Put runner logs, stdout/stderr captures, visible-command helper scripts, validation JSON, contact sheets, and diagnostic/error screenshots in `evidence/tmp`.
 
 5. Verify evidence:
    - Check that the screenshot is not blank.
    - Check that the window title, path/node, keyword, and target value are visible.
    - If text is truncated, expand columns, open properties, zoom, or resize before accepting.
+   - For installed-updates checks, accept only the real `已安装更新` / `Installed Updates` page. The screenshot must show that page title or breadcrumb and the Windows update list/KB entry area, not just the `卸载或更改程序` / installed-programs list.
 
 6. Output:
    - Screenshots are always saved when checks run.
+   - The final evidence directory root must contain final screenshots only.
+   - Delete `evidence/tmp` at task completion unless the user explicitly asks to keep diagnostics for troubleshooting.
    - Only write Excel when requested.
    - For embedded-image output, prefer `scripts/workbook_embed_excel_com.ps1` on Windows hosts with Excel installed; insert screenshots directly into the detected `检查情况` column and remove filename/link wording.
 
@@ -75,6 +80,7 @@ Use sibling outputs next to the source workbook unless the user specifies otherw
 - Plan: `Windows完整检查_<task_label>_执行计划.json`
 
 Do not add timestamps or nested final-evidence folders to final output names unless the user asks.
+Do not leave intermediate files in the final evidence directory. Use `Windows完整检查_<task_label>_证据/tmp` only as a temporary staging area, then remove it when the run is complete.
 
 ## Matching And Adaptation
 
@@ -135,4 +141,5 @@ Before final response:
 - Evidence filenames follow the row naming contract.
 - Workbook output, if requested, is a copied workbook and not the original.
 - Embedded-image output has no `截图:`, `证据:`, `rowNN_`, or hyperlink remnants in the check-result cells.
+- The final evidence directory contains only accepted final screenshots; no `tmp` directory, runner logs, stdout/stderr text, validation JSON, contact sheets, or helper scripts remain unless diagnostics were explicitly kept.
 - Report whether any rows were adaptive, unsupported, or manually confirmed.

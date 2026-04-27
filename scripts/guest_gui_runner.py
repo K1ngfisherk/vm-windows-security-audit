@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -18,6 +19,10 @@ from typing import Any, Callable, Iterable
 
 import pyautogui
 import pygetwindow as gw
+try:
+    import pyperclip
+except Exception:  # pragma: no cover - optional dependency guard for damaged guests.
+    pyperclip = None
 
 
 pyautogui.FAILSAFE = False
@@ -29,8 +34,10 @@ class Runner:
     def __init__(self, out_dir: Path, debug: bool = False):
         self.out_dir = out_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.tmp_dir = self.out_dir / "tmp"
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
         self.debug = debug
-        self.log_path = self.out_dir / "guest_gui_runner.log"
+        self.log_path = self.tmp_dir / "guest_gui_runner.log"
         self.log_path.write_text("", encoding="utf-8")
 
     def log(self, message: str) -> None:
@@ -101,14 +108,45 @@ class Runner:
         pyautogui.doubleClick(win.left + x, win.top + y)
         self.wait(delay)
 
-    def shot(self, filename: str) -> str:
-        target = self.out_dir / filename
+    def shot(self, filename: str, *, final: bool = True) -> str:
+        root = self.out_dir if final else self.tmp_dir
+        target = root / Path(filename).name
         target.parent.mkdir(parents=True, exist_ok=True)
         self.wait(0.7)
         image = pyautogui.screenshot()
         image.save(target)
-        self.log(f"shot {target}")
+        kind = "shot" if final else "tmp-shot"
+        self.log(f"{kind} {target}")
         return str(target)
+
+    def tmp_shot(self, filename: str) -> str:
+        return self.shot(filename, final=False)
+
+    def cleanup_tmp(self) -> None:
+        cleanup_tmp_dir(self.out_dir)
+
+    def copy_control_panel_location(self) -> str:
+        if pyperclip is None:
+            return ""
+        try:
+            pyautogui.hotkey("alt", "d")
+            self.wait(0.2)
+            pyautogui.hotkey("ctrl", "c")
+            self.wait(0.2)
+            location = pyperclip.paste() or ""
+            pyautogui.press("esc")
+            self.log(f"control-panel-location {location!r}")
+            return location
+        except Exception as exc:
+            self.log(f"control-panel-location failed: {exc!r}")
+            return ""
+
+    def control_panel_location_has(self, win: Any, tokens: Iterable[str]) -> bool:
+        title = getattr(win, "title", "")
+        if any(token.lower() in title.lower() for token in tokens):
+            return True
+        location = self.copy_control_panel_location()
+        return any(token.lower() in location.lower() for token in tokens)
 
     def open_mmc(self, msc_name: str, title_parts: str | Iterable[str], wait: float = 4.0) -> Any:
         self.kill_ui()
@@ -128,7 +166,7 @@ class Runner:
 
     def visible_cmd(self, row: int, name: str, commands: list[str], filename: str) -> list[str]:
         self.kill_ui()
-        bat = self.out_dir / f"row{row:02d}_{name}_visible.cmd"
+        bat = self.tmp_dir / f"row{row:02d}_{name}_visible.cmd"
         lines = [
             "@echo off",
             "chcp 936 >nul",
@@ -197,7 +235,7 @@ class Runner:
         pyautogui.press("right")
         self.wait(0.5)
         if debug_prefix:
-            self.shot(f"{debug_prefix}_admin_templates.png")
+            self.tmp_shot(f"{debug_prefix}_admin_templates.png")
         return self.active_window(["本地组策略编辑器", "Local Group Policy Editor"])
 
     def open_gpedit_computer_rdsh(self, folder_name: str) -> Any:
@@ -419,10 +457,35 @@ def action_eventvwr_system_log_properties(r: Runner, item: dict[str, Any]) -> li
 
 def action_control_installed_updates(r: Runner, item: dict[str, Any]) -> list[str]:
     r.kill_ui()
-    subprocess.Popen([r"C:\Windows\System32\control.exe", "appwiz.cpl"])
-    r.wait(5.0)
-    pyautogui.click(223, 236)
-    r.wait(5.0)
+    tokens = ["已安装更新", "Installed Updates"]
+    titles = ["已安装更新", "Installed Updates", "程序和功能", "Programs and Features"]
+
+    try:
+        subprocess.Popen(
+            [
+                r"C:\Windows\System32\rundll32.exe",
+                "shell32.dll,Control_RunDLL",
+                "appwiz.cpl,,2",
+            ]
+        )
+        r.wait(5.0)
+        win = r.maximize(r.wait_window(titles, 10))
+    except Exception as exc:
+        r.log(f"direct installed-updates route failed: {exc!r}; falling back to appwiz link")
+        r.kill_ui()
+        subprocess.Popen([r"C:\Windows\System32\control.exe", "appwiz.cpl"])
+        r.wait(5.0)
+        win = r.maximize(r.wait_window(titles, 25))
+
+    if not r.control_panel_location_has(win, tokens):
+        # Server 2012 often opens Programs and Features first; use the left
+        # navigation link with coordinates relative to the actual window.
+        r.click(win, 86, 126, 4.0)
+        win = r.active_window(titles)
+
+    if not r.control_panel_location_has(win, tokens):
+        raise RuntimeError("Programs and Features did not navigate to Installed Updates")
+
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_control_installed_updates.png"))
     r.kill_ui()
     return [path]
@@ -517,10 +580,10 @@ def run_plan(plan_path: Path, out_dir: Path, only_row: int | None = None, debug:
             runner.log(f"ERROR row={item.get('row')} action={action_name}: {type(exc).__name__}: {exc}")
             try:
                 error_name = f"row{int(item['row']):02d}_error_{action_name}.png"
-                runner.shot(error_name)
-                error_evidence = [error_name]
+                error_path = runner.tmp_shot(error_name)
+                diagnostics = [Path(error_path).name]
             except Exception:
-                error_evidence = []
+                diagnostics = []
             runner.kill_ui()
             results.append(
                 {
@@ -529,10 +592,25 @@ def run_plan(plan_path: Path, out_dir: Path, only_row: int | None = None, debug:
                     "action": action_name,
                     "lane": item.get("lane"),
                     "error": f"{type(exc).__name__}: {exc}",
-                    "evidence": error_evidence,
+                    "evidence": [],
+                    "diagnostics": diagnostics,
                 }
             )
-    return {"results": results, "log": str(runner.log_path)}
+    return {"results": results, "log": str(runner.log_path), "tmp_dir": str(runner.tmp_dir)}
+
+
+def cleanup_tmp_dir(out_dir: Path) -> None:
+    tmp_dir = out_dir / "tmp"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def main() -> None:
@@ -542,12 +620,20 @@ def main() -> None:
     parser.add_argument("--only-row", type=int)
     parser.add_argument("--result-json", type=Path)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--keep-tmp", action="store_true", help="Keep out-dir/tmp diagnostics after the run.")
     args = parser.parse_args()
 
     result = run_plan(args.plan, args.out_dir, args.only_row, args.debug)
     if args.result_json:
         args.result_json.parent.mkdir(parents=True, exist_ok=True)
         args.result_json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not args.keep_tmp:
+        cleanup_tmp_dir(args.out_dir)
+        result["tmp_removed"] = True
+        if args.result_json and path_is_under(args.result_json, args.out_dir):
+            args.result_json.unlink(missing_ok=True)
+        elif args.result_json:
+            args.result_json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False))
 
 

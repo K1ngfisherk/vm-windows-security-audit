@@ -4,7 +4,10 @@
 
 - Final evidence directory: `Windows完整检查_<task_label>_证据`.
 - Put final screenshots directly in that directory.
+- Put all intermediate files under `Windows完整检查_<task_label>_证据/tmp`.
+- Delete `tmp` after task completion unless the user explicitly asks to keep diagnostics.
 - Do not use timestamped final folders or nested `最终截图证据` folders unless requested.
+- The final evidence directory root should contain accepted final screenshots only, not logs, stdout/stderr captures, JSON diagnostics, helper scripts, contact sheets, or preview files.
 - Screenshot filenames:
   - Lowercase ASCII.
   - Prefix with workbook row number: `rowNN_`.
@@ -72,3 +75,4 @@ When the user requests embedded evidence:
 - RDP encryption level checks: use the graphical policy page when available. Do not use `MinEncryptionLevel`, `SecurityLayer`, or similar runtime values as replacement evidence.
 - Default account checks: if checking whether Guest is disabled, open the Guest properties dialog.
 - Security Options checks: for "do not display last username" and "clear virtual memory pagefile", use the Local Security Policy Security Options page when available. Do not add registry evidence if the GUI proves the item.
+- Installed updates checks: use the `已安装更新` / `Installed Updates` page under Programs and Features. The final screenshot must show that page title or breadcrumb plus the Windows update list/KB entry area. Do not accept the plain `卸载或更改程序` / installed-programs list as evidence for patch location.
