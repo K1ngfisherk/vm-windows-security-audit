@@ -106,9 +106,9 @@ Screenshot names:
 rowNN_<tool>_<check_key>.png
 ```
 
-The final evidence directory root should contain accepted final screenshots only. Logs, stdout/stderr captures, runtime JSON files such as `plan.json`, `runner_result.json`, and `image_validation.json`, contact sheets, temporary scripts, and diagnostic error screenshots must go under `Windows完整检查_<task_label>_证据/tmp`, and that `tmp` directory is deleted by default when the task completes.
+After a run, the evidence directory should contain only deliverable final screenshots; logs, diagnostics, and other temporary files are staged and cleaned automatically by the workflow.
 
-Installed-update evidence must land on the actual `Installed Updates` page and show the Windows update/KB list area. Do not accept the plain installed-programs list as patch-location evidence.
+Installed-update checks capture the actual `Installed Updates` page so the screenshot shows the Windows update/KB list, not the generic installed-programs page.
 
 ## Notes
 
