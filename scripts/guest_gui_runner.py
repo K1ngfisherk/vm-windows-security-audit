@@ -10,8 +10,12 @@ scheduled task owned by the requested audit account.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.wintypes as wintypes
 import json
+import re
 import shutil
+import statistics
 import subprocess
 import time
 from pathlib import Path
@@ -28,6 +32,179 @@ except Exception:  # pragma: no cover - optional dependency guard for damaged gu
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.12
 CREATE_NEW_CONSOLE = 0x00000010
+
+UIA_DUMP_SCRIPT = r"""
+$ErrorActionPreference = "SilentlyContinue"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class NativeMethods {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+}
+"@
+$handle = [NativeMethods]::GetForegroundWindow()
+$root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+if ($null -eq $root) { $root = [System.Windows.Automation.AutomationElement]::RootElement }
+$all = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, [System.Windows.Automation.Condition]::TrueCondition)
+$result = New-Object System.Collections.Generic.List[object]
+$max = [Math]::Min($all.Count, 1800)
+for ($i = 0; $i -lt $max; $i++) {
+  $e = $all.Item($i)
+  $rect = $e.Current.BoundingRectangle
+  if ($rect.Width -le 1 -or $rect.Height -le 1) { continue }
+  $name = [string]$e.Current.Name
+  $value = ""
+  $pattern = $null
+  try {
+    if ($e.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+      $value = [string]$pattern.Current.Value
+    }
+  } catch {}
+  $legacyName = ""
+  $legacyValue = ""
+  $legacyDescription = ""
+  $legacyPattern = $null
+  try {
+    if ($e.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPattern)) {
+      $legacyName = [string]$legacyPattern.Current.Name
+      $legacyValue = [string]$legacyPattern.Current.Value
+      $legacyDescription = [string]$legacyPattern.Current.Description
+    }
+  } catch {}
+  if (
+    [string]::IsNullOrWhiteSpace($name) -and
+    [string]::IsNullOrWhiteSpace($value) -and
+    [string]::IsNullOrWhiteSpace($legacyName) -and
+    [string]::IsNullOrWhiteSpace($legacyValue) -and
+    [string]::IsNullOrWhiteSpace($legacyDescription)
+  ) { continue }
+  $result.Add([pscustomobject]@{
+    name = $name
+    value = $value
+    legacyName = $legacyName
+    legacyValue = $legacyValue
+    legacyDescription = $legacyDescription
+    automationId = [string]$e.Current.AutomationId
+    className = [string]$e.Current.ClassName
+    controlType = [string]$e.Current.ControlType.ProgrammaticName
+    x = [int]$rect.X
+    y = [int]$rect.Y
+    w = [int]$rect.Width
+    h = [int]$rect.Height
+  })
+}
+$result | ConvertTo-Json -Compress -Depth 4
+"""
+
+
+class EvidenceValidationError(RuntimeError):
+    """Raised when a screenshot exists but does not prove the requested row."""
+
+
+SEMANTIC_RULES: list[tuple[str, dict[str, Any]]] = [
+    ("secpol_password_policy", {
+        "must_all_any": [["本地安全策略", "local security policy", "secpol"], ["密码策略", "password policy", "密码必须符合复杂性要求"]],
+        "forbid_any": ["本地组策略", "local group policy", "gpedit", "本地用户和组", "local users and groups"],
+    }),
+    ("secpol_account_lockout_policy", {
+        "must_all_any": [["本地安全策略", "local security policy", "secpol"], ["帐户锁定策略", "账户锁定策略", "account lockout policy", "锁定阈值"]],
+        "forbid_any": ["本地组策略", "local group policy", "gpedit", "本地用户和组", "local users and groups"],
+    }),
+    ("secpol_audit_policy", {
+        "must_all_any": [["本地安全策略", "local security policy", "secpol"], ["审核策略", "audit policy"]],
+        "forbid_any": ["本地组策略", "local group policy", "gpedit", "本地用户和组", "local users and groups"],
+    }),
+    ("secpol_security_options", {
+        "must_all_any": [["本地安全策略", "local security policy", "secpol"], ["安全选项", "security options"]],
+        "forbid_any": ["本地组策略", "local group policy", "gpedit", "本地用户和组", "local users and groups"],
+    }),
+    ("gpedit_rdp_client_connection_encryption_level", {
+        "must_any": ["加密", "encryption", "rdp", "remote desktop"],
+        "forbid_any": ["本地用户和组", "local users and groups", "lusrmgr"],
+    }),
+    ("gpedit_idle_session_limit", {
+        "must_any": ["会话", "空闲", "session", "idle", "time limit"],
+        "forbid_any": ["本地用户和组", "local users and groups", "lusrmgr"],
+    }),
+    ("gpedit_limit_number_of_connections", {
+        "must_any": ["连接", "connection"],
+        "forbid_any": ["本地用户和组", "local users and groups", "lusrmgr"],
+    }),
+    ("lusrmgr_guest_properties_disabled", {
+        "must_all_any": [["guest", "来宾"], ["属性", "properties"], ["账户已禁用", "帐户已禁用", "account is disabled"]],
+        "forbid_any": ["本地组策略", "local group policy", "gpedit"],
+    }),
+    ("lusrmgr_administrators_members", {
+        "must_all_any": [["administrator", "administrators", "管理员"], ["属性", "properties", "成员", "members"]],
+        "forbid_any": ["本地组策略", "local group policy", "gpedit"],
+    }),
+    ("lusrmgr_default_accounts", {
+        "must_all_any": [
+            ["本地用户和组", "local users and groups", "lusrmgr"],
+            ["administrator"],
+            ["defaultaccount"],
+            ["guest"],
+            ["wdagutilityaccount"],
+        ],
+        "forbid_any": ["本地组策略", "local group policy", "gpedit"],
+    }),
+    ("lusrmgr", {
+        "must_any": ["本地用户和组", "local users and groups", "lusrmgr", "用户", "users"],
+        "forbid_any": ["本地组策略", "local group policy", "gpedit"],
+    }),
+    ("secpol", {
+        "must_any": ["本地安全策略", "local security policy", "secpol"],
+        "forbid_any": ["本地组策略", "local group policy", "gpedit", "本地用户和组", "local users and groups"],
+    }),
+    ("eventvwr_system_log_properties", {
+        "must_any": ["system", "系统", "属性", "properties", "event viewer", "事件查看器"],
+        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+    }),
+    ("eventvwr", {
+        "must_any": ["event viewer", "事件查看器"],
+        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+    }),
+    ("services_remote_registry", {
+        "must_all_any": [["services", "服务"], ["remote registry", "remote", "registry"]],
+        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+    }),
+    ("services", {
+        "must_any": ["services", "服务"],
+        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+    }),
+    ("fsmgmt", {
+        "must_any": ["shared folders", "共享文件夹", "共享"],
+        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+    }),
+    ("regedit_lsa_restrictanonymous", {
+        "must_all_any": [
+            ["registry editor", "注册表编辑器", "regedit"],
+            ["restrictanonymous"],
+            ["restrictanonymoussam"],
+            ["reg_dword", "dword"],
+        ],
+        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+    }),
+    ("regedit", {
+        "must_any": ["registry editor", "注册表编辑器", "regedit"],
+        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+    }),
+    ("control_installed_updates", {
+        "must_any": ["installed updates", "已安装更新", "已安装的更新"],
+        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+    }),
+    ("identity_users", {
+        "must_any": ["identity_users_visible", "row"],
+        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+    }),
+    ("admin_auth_method", {
+        "must_any": ["admin_auth_method_visible", "row"],
+        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+    }),
+]
 
 
 class Runner:
@@ -46,6 +223,564 @@ class Runner:
 
     def wait(self, seconds: float = 1.0) -> None:
         time.sleep(seconds)
+
+    def item_keywords(self, item: dict[str, Any], extra: Iterable[str] = ()) -> list[str]:
+        tokens: list[str] = []
+        tokens.extend(str(token) for token in item.get("keywords", []) if str(token).strip())
+        source = item.get("source") or {}
+        for key in ("item", "expected", "operation", "remediation"):
+            text = str(source.get(key) or "")
+            tokens.extend(re.findall(r"[\u4e00-\u9fffA-Za-z0-9_$\\.-]{2,}", text))
+        tokens.extend(str(token) for token in extra if str(token).strip())
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for token in tokens:
+            token = token.strip()
+            if not token or "?" in token:
+                continue
+            if len(token) > 24 and not re.search(r"[A-Za-z0-9_$\\.-]", token):
+                continue
+            key = token.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(token)
+        return deduped[:24]
+
+    def uia_elements(self) -> list[dict[str, Any]]:
+        try:
+            proc = subprocess.run(
+                [
+                    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    UIA_DUMP_SCRIPT,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=12,
+            )
+        except Exception as exc:
+            self.log(f"uia dump failed: {exc!r}")
+            return []
+        if proc.returncode != 0:
+            self.log(f"uia dump returned {proc.returncode}: {proc.stderr.decode('utf-8', errors='ignore')}")
+            return []
+        text = proc.stdout.decode("utf-8", errors="ignore").strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception as exc:
+            self.log(f"uia json parse failed: {exc!r}; raw={text[:500]!r}")
+            return []
+        if isinstance(parsed, dict):
+            return [parsed]
+        if isinstance(parsed, list):
+            return [entry for entry in parsed if isinstance(entry, dict)]
+        return []
+
+    def element_text(self, element: dict[str, Any]) -> str:
+        return " ".join(
+            [
+                str(element.get("name") or ""),
+                str(element.get("value") or ""),
+                str(element.get("legacyName") or ""),
+                str(element.get("legacyValue") or ""),
+                str(element.get("legacyDescription") or ""),
+            ]
+        )
+
+    def visible_text(self) -> str:
+        snapshot = self.window_snapshot()
+        titles = [snapshot.get("active_title", "")] + [w["title"] for w in snapshot["windows"]]
+        element_text = []
+        for element in self.uia_elements():
+            element_text.append(self.element_text(element))
+        list_text = [str(item.get("row_text") or item.get("text") or "") for item in self.listview_text_items()]
+        return " ".join(titles + element_text + list_text)
+
+    def require_visible_keywords(self, item: dict[str, Any], phase: str, extra: Iterable[str] = (), min_hits: int = 1) -> list[str]:
+        keywords = self.item_keywords(item, extra)
+        text = self.visible_text().casefold()
+        hits = [token for token in keywords if token.casefold() in text]
+        self.log(f"keyword-guard phase={phase} keywords={keywords} hits={hits}")
+        if len(hits) < min_hits:
+            diag = self.tmp_shot(f"row{int(item['row']):02d}_{phase}_keyword_guard.png")
+            raise EvidenceValidationError(
+                f"Keyword guard failed before PyAutoGUI click at {phase}. "
+                f"Expected one of {keywords}; hits={hits}; diagnostic={Path(diag).name}"
+            )
+        return hits
+
+    def require_visible_token_groups(
+        self,
+        item: dict[str, Any],
+        phase: str,
+        groups: Iterable[Iterable[str]],
+    ) -> list[list[str]]:
+        text = self.visible_text().casefold()
+        hits: list[list[str]] = []
+        missing: list[list[str]] = []
+        normalized_groups = [[str(token).strip() for token in group if str(token).strip()] for group in groups]
+        for group in normalized_groups:
+            group_hits = [token for token in group if token.casefold() in text]
+            hits.append(group_hits)
+            if not group_hits:
+                missing.append(group)
+        self.log(f"token-group-guard phase={phase} groups={normalized_groups} hits={hits} missing={missing}")
+        if missing:
+            diag = self.tmp_shot(f"row{int(item['row']):02d}_{phase}_token_group_guard.png")
+            raise EvidenceValidationError(
+                f"Keyword group guard failed at {phase}. "
+                f"Missing groups={missing}; diagnostic={Path(diag).name}"
+            )
+        return hits
+
+    def is_clickable_text_element(self, element: dict[str, Any], *, allow_window: bool = False) -> bool:
+        control_type = str(element.get("controlType") or "").casefold()
+        width = int(element.get("w") or 0)
+        height = int(element.get("h") or 0)
+        if width <= 1 or height <= 1:
+            return False
+        if "window" in control_type and not allow_window:
+            return False
+        screen_w, screen_h = pyautogui.size()
+        if width * height > screen_w * screen_h * 0.45 and not allow_window:
+            return False
+        return True
+
+    def find_text_element(self, keywords: Iterable[str], *, allow_window: bool = False) -> tuple[dict[str, Any], str] | None:
+        search = [token.strip() for token in keywords if token and token.strip() and "?" not in token]
+        elements = [element for element in self.uia_elements() if self.is_clickable_text_element(element, allow_window=allow_window)]
+        elements = sorted(
+            elements,
+            key=lambda e: (
+                0 if any(kind in str(e.get("controlType") or "") for kind in ["TreeItem", "ListItem", "DataItem", "Button", "MenuItem"]) else 1,
+                int(e.get("w") or 0) * int(e.get("h") or 0),
+            ),
+        )
+        for token in search:
+            folded = token.casefold()
+            for element in elements:
+                haystack = self.element_text(element).casefold()
+                if folded in haystack:
+                    return element, token
+        return None
+
+    def find_listview_windows(self) -> list[dict[str, int | str]]:
+        """Return visible SysListView32 controls under the active MMC window."""
+        user32 = ctypes.windll.user32
+        hwnd_root = user32.GetForegroundWindow()
+        if not hwnd_root:
+            return []
+
+        result: list[dict[str, int | str]] = []
+        seen_hwnds: set[int] = set()
+        enum_proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def enum_child(hwnd: int, _lparam: int) -> bool:
+            hwnd_int = int(hwnd)
+            if hwnd_int in seen_hwnds:
+                return True
+            seen_hwnds.add(hwnd_int)
+            class_name = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, class_name, len(class_name))
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            width = int(rect.right - rect.left)
+            height = int(rect.bottom - rect.top)
+            if class_name.value == "SysListView32" and width > 20 and height > 20:
+                result.append(
+                    {
+                        "hwnd": hwnd_int,
+                        "class": class_name.value,
+                        "x": int(rect.left),
+                        "y": int(rect.top),
+                        "w": width,
+                        "h": height,
+                    }
+                )
+            return True
+
+        callback = enum_proc_type(enum_child)
+        user32.EnumChildWindows(hwnd_root, callback, 0)
+        return result
+
+    def read_listview_items(self, hwnd: int, *, max_items: int = 3000, max_subitems: int = 8) -> list[dict[str, Any]]:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        LVM_FIRST = 0x1000
+        LVM_GETITEMCOUNT = LVM_FIRST + 4
+        LVM_GETITEMTEXTW = LVM_FIRST + 115
+        PROCESS_VM_OPERATION = 0x0008
+        PROCESS_VM_READ = 0x0010
+        PROCESS_VM_WRITE = 0x0020
+        PROCESS_QUERY_INFORMATION = 0x0400
+        MEM_COMMIT = 0x1000
+        MEM_RESERVE = 0x2000
+        MEM_RELEASE = 0x8000
+        PAGE_READWRITE = 0x04
+
+        class LVITEMW(ctypes.Structure):
+            _fields_ = [
+                ("mask", wintypes.UINT),
+                ("iItem", ctypes.c_int),
+                ("iSubItem", ctypes.c_int),
+                ("state", wintypes.UINT),
+                ("stateMask", wintypes.UINT),
+                ("pszText", ctypes.c_void_p),
+                ("cchTextMax", ctypes.c_int),
+                ("iImage", ctypes.c_int),
+                ("lParam", ctypes.c_void_p),
+                ("iIndent", ctypes.c_int),
+                ("iGroupId", ctypes.c_int),
+                ("cColumns", wintypes.UINT),
+                ("puColumns", ctypes.c_void_p),
+                ("piColFmt", ctypes.c_void_p),
+                ("iGroup", ctypes.c_int),
+            ]
+
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+        user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.VirtualAllocEx.restype = ctypes.c_void_p
+        kernel32.VirtualAllocEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
+        kernel32.VirtualFreeEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD]
+        kernel32.ReadProcessMemory.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        kernel32.WriteProcessMemory.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+
+        count = int(user32.SendMessageW(hwnd, LVM_GETITEMCOUNT, 0, 0))
+        if count <= 0:
+            return []
+        count = min(count, max_items)
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        process = kernel32.OpenProcess(
+            PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION,
+            False,
+            pid.value,
+        )
+        if not process:
+            return []
+
+        text_chars = 512
+        text_bytes = text_chars * 2
+        item_size = ctypes.sizeof(LVITEMW)
+        remote_item = kernel32.VirtualAllocEx(process, None, item_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+        remote_text = kernel32.VirtualAllocEx(process, None, text_bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+        items: list[dict[str, Any]] = []
+        try:
+            if not remote_item or not remote_text:
+                return []
+            for index in range(count):
+                columns: list[str] = []
+                for subitem in range(max(1, max_subitems)):
+                    lvitem = LVITEMW()
+                    lvitem.iItem = index
+                    lvitem.iSubItem = subitem
+                    lvitem.pszText = remote_text
+                    lvitem.cchTextMax = text_chars
+                    written = ctypes.c_size_t()
+                    kernel32.WriteProcessMemory(process, remote_text, ctypes.create_string_buffer(text_bytes), text_bytes, ctypes.byref(written))
+                    kernel32.WriteProcessMemory(process, remote_item, ctypes.byref(lvitem), item_size, ctypes.byref(written))
+                    user32.SendMessageW(hwnd, LVM_GETITEMTEXTW, index, remote_item)
+                    buffer = ctypes.create_string_buffer(text_bytes)
+                    read = ctypes.c_size_t()
+                    kernel32.ReadProcessMemory(process, remote_text, buffer, text_bytes, ctypes.byref(read))
+                    raw = bytes(buffer)
+                    text = raw.decode("utf-16-le", errors="ignore").split("\x00", 1)[0].strip()
+                    if subitem == 0 and not text:
+                        break
+                    columns.append(text)
+                columns = [text for text in columns if text]
+                if columns:
+                    items.append({"hwnd": hwnd, "index": index, "text": columns[0], "columns": columns, "row_text": " ".join(columns)})
+        finally:
+            if remote_item:
+                kernel32.VirtualFreeEx(process, remote_item, 0, MEM_RELEASE)
+            if remote_text:
+                kernel32.VirtualFreeEx(process, remote_text, 0, MEM_RELEASE)
+            kernel32.CloseHandle(process)
+        return items
+
+    def listview_text_items(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for view in self.find_listview_windows():
+            hwnd = int(view["hwnd"])
+            try:
+                for item in self.read_listview_items(hwnd):
+                    item.update({"list_rect": view})
+                    items.append(item)
+            except Exception as exc:
+                self.log(f"win32-list-read failed hwnd={hwnd}: {exc!r}")
+        return items
+
+    def set_listview_column_widths(self, phase: str, widths: Iterable[int | None]) -> None:
+        user32 = ctypes.windll.user32
+        LVM_FIRST = 0x1000
+        LVM_GETCOLUMNWIDTH = LVM_FIRST + 29
+        LVM_SETCOLUMNWIDTH = LVM_FIRST + 30
+        applied: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for view in self.find_listview_windows():
+            hwnd = int(view["hwnd"])
+            view_applied: list[dict[str, int | None]] = []
+            for column, width in enumerate(widths):
+                if width is None:
+                    view_applied.append({"column": column, "requested": None, "actual": None})
+                    continue
+                requested_width = max(40, int(width))
+                user32.SendMessageW(hwnd, LVM_SETCOLUMNWIDTH, column, requested_width)
+                actual_width = int(user32.SendMessageW(hwnd, LVM_GETCOLUMNWIDTH, column, 0))
+                view_applied.append({"column": column, "requested": requested_width, "actual": actual_width})
+                if actual_width < requested_width - 8:
+                    failures.append({"hwnd": hwnd, "column": column, "requested": requested_width, "actual": actual_width})
+                self.wait(0.05)
+            applied.append({"hwnd": hwnd, "rect": view, "widths": view_applied})
+        self.log(f"listview-column-widths phase={phase} applied={applied}")
+        self.wait(0.4)
+        if not applied or failures:
+            diag = self.tmp_shot(f"{phase}_column_width_failed.png")
+            raise EvidenceValidationError(
+                f"Could not expand required list view columns at {phase}. "
+                f"applied={applied}; failures={failures}; diagnostic={Path(diag).name}"
+            )
+
+    def find_listview_item(self, keywords: Iterable[str]) -> tuple[dict[str, Any], str] | None:
+        search = [token.strip() for token in keywords if token and token.strip() and "?" not in token]
+        if not search:
+            return None
+        items = self.listview_text_items()
+        for token in search:
+            folded = token.casefold()
+            for item in items:
+                if str(item.get("row_text") or item.get("text") or "").casefold() == folded:
+                    return item, token
+        for token in search:
+            folded = token.casefold()
+            for item in items:
+                if folded in str(item.get("row_text") or item.get("text") or "").casefold():
+                    return item, token
+        return None
+
+    def click_list_text(
+        self,
+        item: dict[str, Any],
+        phase: str,
+        extra: Iterable[str],
+        *,
+        double: bool = False,
+        delay: float = 0.8,
+    ) -> None:
+        row_keywords = self.item_keywords(item)
+        keywords: list[str] = []
+        for token in list(extra):
+            token = str(token).strip()
+            if token and token.casefold() not in {seen.casefold() for seen in keywords}:
+                keywords.append(token)
+        found = self.find_listview_item(keywords)
+        self.log(f"win32-list-only phase={phase} row_keywords={row_keywords} search_keywords={keywords} found={found}")
+        if not found:
+            sample = [str(entry.get("text") or "") for entry in self.listview_text_items()[:80]]
+            self.log(f"win32-list-only-miss phase={phase} sample={sample}")
+            diag = self.tmp_shot(f"row{int(item['row']):02d}_{phase}_list_text_not_found.png")
+            raise EvidenceValidationError(
+                f"Could not find list view text before click at {phase}. "
+                f"Keywords extracted from row: {row_keywords}; search_keywords={keywords}; diagnostic={Path(diag).name}"
+            )
+        list_item, token = found
+        self.click_listview_item(list_item, token, double=double, delay=delay)
+
+    def click_listview_item(self, item: dict[str, Any], token: str, *, double: bool = False, delay: float = 0.8) -> None:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        LVM_FIRST = 0x1000
+        LVM_ENSUREVISIBLE = LVM_FIRST + 19
+        LVM_GETITEMRECT = LVM_FIRST + 14
+        LVIR_BOUNDS = 0
+        PROCESS_VM_OPERATION = 0x0008
+        PROCESS_VM_READ = 0x0010
+        PROCESS_VM_WRITE = 0x0020
+        PROCESS_QUERY_INFORMATION = 0x0400
+        MEM_COMMIT = 0x1000
+        MEM_RESERVE = 0x2000
+        MEM_RELEASE = 0x8000
+        PAGE_READWRITE = 0x04
+
+        hwnd = int(item["hwnd"])
+        index = int(item["index"])
+        user32.SendMessageW(hwnd, LVM_ENSUREVISIBLE, index, 0)
+        self.wait(0.2)
+
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        process = kernel32.OpenProcess(
+            PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION,
+            False,
+            pid.value,
+        )
+        if not process:
+            raise EvidenceValidationError(f"Could not open list view process for token {token!r}")
+
+        remote_rect = kernel32.VirtualAllocEx(
+            process,
+            None,
+            ctypes.sizeof(wintypes.RECT),
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        )
+        try:
+            rect = wintypes.RECT()
+            rect.left = LVIR_BOUNDS
+            written = ctypes.c_size_t()
+            kernel32.WriteProcessMemory(process, remote_rect, ctypes.byref(rect), ctypes.sizeof(rect), ctypes.byref(written))
+            ok = user32.SendMessageW(hwnd, LVM_GETITEMRECT, index, remote_rect)
+            if not ok:
+                raise EvidenceValidationError(f"Could not read list view row rectangle for token {token!r}")
+            read = ctypes.c_size_t()
+            kernel32.ReadProcessMemory(process, remote_rect, ctypes.byref(rect), ctypes.sizeof(rect), ctypes.byref(read))
+        finally:
+            if remote_rect:
+                kernel32.VirtualFreeEx(process, remote_rect, 0, MEM_RELEASE)
+            kernel32.CloseHandle(process)
+
+        point = wintypes.POINT()
+        point.x = int(rect.left + max(4, (rect.right - rect.left) // 2))
+        point.y = int(rect.top + max(4, (rect.bottom - rect.top) // 2))
+        user32.ClientToScreen(hwnd, ctypes.byref(point))
+        if double:
+            pyautogui.doubleClick(point.x, point.y)
+        else:
+            pyautogui.click(point.x, point.y)
+        self.log(f"win32-list-click token={token!r} text={item.get('text')!r} hwnd={hwnd} index={index} at={point.x},{point.y}")
+        self.wait(delay)
+
+    def click_text(
+        self,
+        item: dict[str, Any],
+        phase: str,
+        extra: Iterable[str] = (),
+        double: bool = False,
+        delay: float = 0.8,
+        include_item_keywords: bool = False,
+        scroll_attempts: int = 0,
+        scroll_key: str = "wheel",
+    ) -> None:
+        row_keywords = self.item_keywords(item)
+        keywords = []
+        candidates = list(extra)
+        if include_item_keywords:
+            candidates += row_keywords
+        for token in candidates:
+            token = str(token).strip()
+            if token and token.casefold() not in {seen.casefold() for seen in keywords}:
+                keywords.append(token)
+        found = None
+        for attempt in range(scroll_attempts + 1):
+            found = self.find_text_element(keywords)
+            self.log(f"text-click phase={phase} attempt={attempt} row_keywords={row_keywords} search_keywords={keywords} found={found}")
+            if found:
+                break
+            list_found = self.find_listview_item(keywords)
+            if list_found:
+                list_item, token = list_found
+                self.log(f"win32-list-found phase={phase} attempt={attempt} row_keywords={row_keywords} search_keywords={keywords} found={list_item}")
+                self.click_listview_item(list_item, token, double=double, delay=delay)
+                return
+            if attempt < scroll_attempts:
+                if scroll_key == "wheel":
+                    pyautogui.scroll(-5)
+                else:
+                    pyautogui.press(scroll_key)
+                self.wait(0.35)
+        if not found:
+            diag = self.tmp_shot(f"row{int(item['row']):02d}_{phase}_text_not_found.png")
+            raise EvidenceValidationError(
+                f"Could not find visible UI text before click at {phase}. "
+                f"Keywords extracted from row: {row_keywords}; search_keywords={keywords}; diagnostic={Path(diag).name}"
+            )
+        element, token = found
+        x = int(element["x"] + max(2, element["w"] // 2))
+        y = int(element["y"] + max(2, element["h"] // 2))
+        if double:
+            pyautogui.doubleClick(x, y)
+        else:
+            pyautogui.click(x, y)
+        self.log(f"text-clicked phase={phase} token={token!r} at={x},{y}")
+        self.wait(delay)
+
+    def set_english_input(self, phase: str) -> None:
+        """Ask the foreground window to use the US keyboard layout before ASCII list search."""
+        try:
+            user32 = ctypes.windll.user32
+            hkl = user32.LoadKeyboardLayoutW("00000409", 1)
+            hwnd = user32.GetForegroundWindow()
+            user32.PostMessageW(hwnd, 0x0050, 0, hkl)  # WM_INPUTLANGCHANGEREQUEST
+            user32.ActivateKeyboardLayout(hkl, 0)
+            self.wait(0.2)
+            pyautogui.press("esc")
+            self.wait(0.1)
+            self.log(f"english-input phase={phase} hwnd={hwnd} hkl={hkl}")
+        except Exception as exc:
+            self.log(f"english-input failed phase={phase}: {exc!r}")
+
+    def focus_details_pane(self, phase: str, tabs: int = 1) -> None:
+        for _ in range(max(0, tabs)):
+            pyautogui.press("tab")
+            self.wait(0.15)
+        self.log(f"focus-details phase={phase} tabs={tabs}")
+
+    def keyboard_search_list_item(
+        self,
+        item: dict[str, Any],
+        phase: str,
+        text: str,
+        *,
+        enter: bool = False,
+        tabs: int = 1,
+        delay: float = 0.8,
+    ) -> None:
+        row_keywords = self.item_keywords(item)
+        if not text or text.casefold() not in [token.casefold() for token in row_keywords]:
+            self.log(f"keyboard-list phase={phase} text={text!r} row_keywords={row_keywords}")
+        self.focus_details_pane(phase, tabs=tabs)
+        self.set_english_input(phase)
+        pyautogui.press("home")
+        self.wait(0.2)
+        pyautogui.write(text, interval=0.02)
+        self.wait(delay)
+        if enter:
+            pyautogui.press("enter")
+            self.wait(delay)
+        self.log(f"keyboard-list phase={phase} text={text!r} enter={enter} row_keywords={row_keywords}")
+
+    def keyboard_select_visible(self, phase: str, text: str, *, enter: bool = False, delay: float = 0.8) -> None:
+        if not text:
+            raise ValueError("text is required")
+        self.set_english_input(phase)
+        pyautogui.write(text, interval=0.02)
+        self.wait(delay)
+        if enter:
+            pyautogui.press("enter")
+            self.wait(delay)
+        self.log(f"keyboard-select phase={phase} text={text!r} enter={enter}")
 
     def kill_ui(self) -> None:
         for name in [
@@ -108,12 +843,100 @@ class Runner:
         pyautogui.doubleClick(win.left + x, win.top + y)
         self.wait(delay)
 
+    def image_stats(self, image: Any) -> dict[str, Any]:
+        sample = image.convert("L").resize((64, 64))
+        pixels = list(sample.getdata())
+        extrema = sample.getextrema()
+        mean = statistics.fmean(pixels)
+        stdev = statistics.pstdev(pixels)
+        usable = (extrema[1] - extrema[0]) >= 12 and stdev >= 4.0 and not (mean <= 3.0 or mean >= 252.0)
+        return {
+            "luma_extrema": list(extrema),
+            "luma_mean": round(mean, 3),
+            "luma_stdev": round(stdev, 3),
+            "image_usable": usable,
+        }
+
+    def window_snapshot(self) -> dict[str, Any]:
+        windows = []
+        for win in gw.getAllWindows():
+            title = (getattr(win, "title", "") or "").strip()
+            if not title:
+                continue
+            windows.append(
+                {
+                    "title": title,
+                    "left": getattr(win, "left", None),
+                    "top": getattr(win, "top", None),
+                    "width": getattr(win, "width", None),
+                    "height": getattr(win, "height", None),
+                }
+            )
+        try:
+            active = gw.getActiveWindow()
+            active_title = (getattr(active, "title", "") or "").strip() if active else ""
+        except Exception:
+            active_title = ""
+        return {"active_title": active_title, "windows": windows}
+
+    def semantic_rule(self, filename: str) -> dict[str, Any] | None:
+        key = Path(filename).stem.lower()
+        for marker, rule in SEMANTIC_RULES:
+            if marker in key:
+                return rule
+        return None
+
+    def validate_candidate(self, filename: str, image: Any) -> dict[str, Any]:
+        stats = self.image_stats(image)
+        snapshot = self.window_snapshot()
+        ui_elements = self.uia_elements()
+        list_items = self.listview_text_items()
+        ui_text = " ".join(
+            [snapshot.get("active_title", "")] + [w["title"] for w in snapshot["windows"]]
+            + [self.element_text(e) for e in ui_elements]
+            + [str(item.get("row_text") or item.get("text") or "") for item in list_items]
+        ).casefold()
+        rule = self.semantic_rule(filename)
+        failures: list[str] = []
+        if not stats["image_usable"]:
+            failures.append(f"blank_or_low_information_image stats={stats}")
+        if rule:
+            must_any = [token.casefold() for token in rule.get("must_any", [])]
+            must_all_any = [[token.casefold() for token in group] for group in rule.get("must_all_any", [])]
+            forbid_any = [token.casefold() for token in rule.get("forbid_any", [])]
+            if must_any and not any(token in ui_text for token in must_any):
+                failures.append(f"missing_expected_window_tokens={rule.get('must_any', [])}")
+            for group in must_all_any:
+                if group and not any(token in ui_text for token in group):
+                    failures.append(f"missing_expected_window_token_group={group}")
+            forbidden_hits = [token for token in forbid_any if token in ui_text]
+            if forbidden_hits:
+                failures.append(f"forbidden_window_tokens={forbidden_hits}")
+        return {
+            "accepted": not failures,
+            "failures": failures,
+            "rule": rule or {},
+            "image": stats,
+            "active_title": snapshot["active_title"],
+            "window_titles": [w["title"] for w in snapshot["windows"]],
+            "matched_ui_text_sample": ui_text[:500],
+        }
+
     def shot(self, filename: str, *, final: bool = True) -> str:
         root = self.out_dir if final else self.tmp_dir
         target = root / Path(filename).name
         target.parent.mkdir(parents=True, exist_ok=True)
         self.wait(0.7)
         image = pyautogui.screenshot()
+        if final:
+            candidate = self.tmp_dir / f"candidate_{target.name}"
+            image.save(candidate)
+            validation = self.validate_candidate(target.name, image)
+            validation_path = self.tmp_dir / f"{target.stem}.validation.json"
+            validation_path.write_text(json.dumps(validation, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.log(f"validation {target.name} {json.dumps(validation, ensure_ascii=False)}")
+            if not validation["accepted"]:
+                raise EvidenceValidationError(f"Screenshot validation failed for {target.name}: {'; '.join(validation['failures'])}")
         image.save(target)
         kind = "shot" if final else "tmp-shot"
         self.log(f"{kind} {target}")
@@ -189,72 +1012,75 @@ class Runner:
             self.log(f"visible cmd window not found: {exc!r}")
         return [self.shot(filename)]
 
-    def open_secpol_account_child(self, child: str) -> Any:
+    def open_secpol_account_child(self, child: str, item: dict[str, Any]) -> Any:
         win = self.open_mmc("secpol.msc", ["本地安全策略", "Local Security Policy"])
-        # Coordinates target the maximized Server 2012 Local Security Policy tree.
-        self.click(win, 25, 116, 0.5)  # expand Account Policies
+        self.click_text(item, "secpol_account_policies", ["帐户策略", "账户策略", "Account Policies"], double=True, delay=0.6)
         if child == "password":
-            self.click(win, 69, 135, 1.2)
+            self.click_text(item, "secpol_password_policy", ["密码策略", "Password Policy"], delay=1.2)
         elif child == "lockout":
-            self.click(win, 85, 153, 1.2)
+            self.click_text(item, "secpol_account_lockout_policy", ["帐户锁定策略", "账户锁定策略", "Account Lockout Policy"], delay=1.2)
         else:
             raise ValueError(child)
         return self.active_window(["本地安全策略", "Local Security Policy"])
 
-    def open_secpol_local_child(self, child: str) -> Any:
+    def open_secpol_local_child(self, child: str, item: dict[str, Any]) -> Any:
         win = self.open_mmc("secpol.msc", ["本地安全策略", "Local Security Policy"])
-        self.click(win, 54, 86, 0.3)
-        pyautogui.press("home")
-        pyautogui.press("down", presses=2, interval=0.15)
-        pyautogui.press("right")
-        self.wait(0.3)
+        self.click_text(item, "secpol_local_policies", ["本地策略", "Local Policies"], double=True, delay=0.6)
         if child == "audit":
-            pyautogui.press("down")
+            self.click_text(item, "secpol_audit_policy", ["审核策略", "Audit Policy"], delay=1.2)
         elif child == "security":
-            pyautogui.press("down", presses=3, interval=0.15)
+            self.click_text(item, "secpol_security_options", ["安全选项", "Security Options"], delay=1.2)
         elif child == "rights":
-            pyautogui.press("down", presses=2, interval=0.15)
+            self.click_text(item, "secpol_user_rights", ["用户权限分配", "User Rights Assignment"], delay=1.2)
         else:
             raise ValueError(child)
-        self.wait(1.2)
         return self.active_window(["本地安全策略", "Local Security Policy"])
 
-    def open_gpedit_computer_admin_templates(self, debug_prefix: str | None = None) -> Any:
+    def open_gpedit_computer_admin_templates(self, item: dict[str, Any], debug_prefix: str | None = None) -> Any:
         win = self.open_mmc("gpedit.msc", ["本地组策略编辑器", "Local Group Policy Editor"], wait=5)
-        self.click(win, 95, 92, 0.2)
-        pyautogui.press("home")
-        self.wait(0.2)
-        pyautogui.press("right")
-        self.wait(0.2)
-        pyautogui.press("down")  # Computer Configuration
-        self.wait(0.2)
-        pyautogui.press("right")
-        self.wait(0.2)
-        pyautogui.press("down", presses=2, interval=0.12)  # Administrative Templates
-        self.wait(0.2)
-        pyautogui.press("right")
-        self.wait(0.5)
+        self.click_text(item, "gpedit_computer_configuration", ["计算机配置", "Computer Configuration"], delay=0.8)
+        self.click_list_text(item, "gpedit_administrative_templates", ["管理模板", "Administrative Templates"], double=True, delay=0.8)
         if debug_prefix:
             self.tmp_shot(f"{debug_prefix}_admin_templates.png")
         return self.active_window(["本地组策略编辑器", "Local Group Policy Editor"])
 
-    def open_gpedit_computer_rdsh(self, folder_name: str) -> Any:
-        win = self.open_gpedit_computer_admin_templates()
-        # Use details pane; this was more stable than deep tree clicking on the
-        # target Server 2012 image.
-        self.click(win, 455, 150, 0.2)
-        self.double_click(win, 430, 146, 0.8)  # Windows Components
-        self.click(win, 455, 150, 0.2)
-        pyautogui.press("end")
-        self.wait(0.4)
-        self.double_click(win, 430, 640, 0.8)  # Remote Desktop Services
-        self.double_click(win, 455, 164, 0.8)  # Remote Desktop Session Host
-        y_by_folder = {
-            "security": 164,
-            "session_time_limits": 204,
-            "connections": 222,
+    def open_gpedit_computer_all_settings(self, item: dict[str, Any]) -> Any:
+        self.open_gpedit_computer_admin_templates(item)
+        self.click_list_text(item, "gpedit_all_settings", ["所有设置", "All Settings"], delay=1.0)
+        return self.active_window(["本地组策略编辑器", "Local Group Policy Editor"])
+
+    def open_gpedit_computer_rdsh(self, folder_name: str, item: dict[str, Any]) -> Any:
+        self.open_gpedit_computer_admin_templates(item)
+        self.click_list_text(item, "gpedit_windows_components", ["Windows 组件", "Windows Components"], double=True, delay=0.8)
+        self.focus_details_pane("gpedit_windows_components_details")
+        self.click_list_text(
+            item,
+            "gpedit_remote_desktop_services",
+            ["远程桌面服务", "Remote Desktop Services", "终端服务"],
+            double=True,
+            delay=0.8,
+        )
+        self.focus_details_pane("gpedit_rd_services_details")
+        self.click_list_text(
+            item,
+            "gpedit_remote_desktop_session_host",
+            ["远程桌面会话主机", "Remote Desktop Session Host"],
+            double=True,
+            delay=0.8,
+        )
+        folder_tokens = {
+            "security": ["安全", "Security", "加密", "encryption"],
+            "session_time_limits": ["会话时间限制", "Session Time Limits", "空闲", "idle"],
+            "connections": ["连接", "Connections", "连接数量"],
         }
-        self.double_click(win, 455, y_by_folder[folder_name], 0.8)
+        self.focus_details_pane(f"gpedit_{folder_name}_details")
+        self.click_list_text(
+            item,
+            f"gpedit_{folder_name}",
+            folder_tokens[folder_name],
+            double=True,
+            delay=0.8,
+        )
         return self.active_window(["本地组策略编辑器", "Local Group Policy Editor"])
 
     def adaptive_open_and_capture(self, item: dict[str, Any]) -> list[str]:
@@ -312,22 +1138,26 @@ def action_identity_users(r: Runner, item: dict[str, Any]) -> list[str]:
 
 
 def action_secpol_password_policy(r: Runner, item: dict[str, Any]) -> list[str]:
-    r.open_secpol_account_child("password")
+    r.open_secpol_account_child("password", item)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_secpol_password_policy.png"))
     r.kill_ui()
     return [path]
 
 
 def action_secpol_account_lockout_policy(r: Runner, item: dict[str, Any]) -> list[str]:
-    r.open_secpol_account_child("lockout")
+    r.open_secpol_account_child("lockout", item)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_secpol_account_lockout_policy.png"))
     r.kill_ui()
     return [path]
 
 
 def action_gpedit_rdp_client_connection_encryption_level(r: Runner, item: dict[str, Any]) -> list[str]:
-    win = r.open_gpedit_computer_rdsh("security")
-    r.double_click(win, 505, 166, 1.0)
+    try:
+        r.open_gpedit_computer_rdsh("security", item)
+    except EvidenceValidationError as exc:
+        r.log(f"gpedit security path failed; falling back to all settings: {exc}")
+        r.open_gpedit_computer_all_settings(item)
+    r.click_text(item, "gpedit_rdp_encryption_policy", ["设置客户端连接加密级别", "Set client connection encryption level", "encryption level", "加密级别", "要求使用特定的安全层"], double=True, delay=1.0, scroll_attempts=8)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_gpedit_rdp_client_connection_encryption_level.png"))
     r.kill_ui()
     return [path]
@@ -335,7 +1165,7 @@ def action_gpedit_rdp_client_connection_encryption_level(r: Runner, item: dict[s
 
 def action_lusrmgr_users(r: Runner, item: dict[str, Any]) -> list[str]:
     win = r.open_mmc("lusrmgr.msc", ["本地用户和组", "Local Users and Groups"])
-    r.click(win, 50, 104, 1.0)
+    r.click_text(item, "lusrmgr_users_node", ["用户", "Users"], delay=1.0)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_lusrmgr_users.png"))
     r.kill_ui()
     return [path]
@@ -357,7 +1187,7 @@ def action_admin_auth_method(r: Runner, item: dict[str, Any]) -> list[str]:
 
 def action_fsmgmt_shares(r: Runner, item: dict[str, Any]) -> list[str]:
     win = r.open_mmc("fsmgmt.msc", ["共享文件夹", "Shared Folders"])
-    r.click(win, 51, 104, 1.0)
+    r.click_text(item, "fsmgmt_shares_node", ["共享", "Shares"], delay=1.0)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_fsmgmt_shares.png"))
     r.kill_ui()
     return [path]
@@ -365,9 +1195,12 @@ def action_fsmgmt_shares(r: Runner, item: dict[str, Any]) -> list[str]:
 
 def action_regedit_lsa_restrictanonymous(r: Runner, item: dict[str, Any]) -> list[str]:
     win = r.open_regedit_key(r"计算机\HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Lsa")
-    # Widen name column so restrictanonymous and restrictanonymoussam are readable.
-    pyautogui.moveTo(win.left + 344, win.top + 54)
-    pyautogui.dragTo(win.left + 500, win.top + 54, duration=0.3, button="left")
+    r.set_listview_column_widths("regedit_lsa_restrictanonymous_columns", [260, 110, 260])
+    r.require_visible_token_groups(
+        item,
+        "regedit_lsa_restrictanonymous_visible",
+        [["restrictanonymous"], ["restrictanonymoussam"], ["REG_DWORD", "DWORD"]],
+    )
     r.wait(0.5)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_regedit_lsa_restrictanonymous.png"))
     r.kill_ui()
@@ -384,18 +1217,18 @@ def action_privilege_separation(r: Runner, item: dict[str, Any]) -> list[str]:
     captured: list[str] = []
 
     win = r.open_mmc("lusrmgr.msc", ["本地用户和组", "Local Users and Groups"])
-    r.click(win, 43, 121, 0.6)
-    r.double_click(win, 260, 124, 1.0)
+    r.click_text(item, "lusrmgr_groups_node", ["组", "Groups"], delay=0.6)
+    r.keyboard_search_list_item(item, "lusrmgr_administrators_group", "Administrators", enter=True, tabs=1, delay=1.0)
     captured.append(r.shot(names[0]))
     r.kill_ui()
 
     if len(names) > 1:
         win = r.open_mmc("services.msc", ["服务", "Services"])
-        r.click(win, 420, 146, 0.2)
         pyautogui.press("home")
         r.wait(0.2)
         pyautogui.write("MySQLa", interval=0.03)
         r.wait(0.8)
+        r.require_visible_keywords(item, "services_mysql_before_enter", ["MySQL", "服务", "Services"], min_hits=1)
         pyautogui.press("enter")
         r.wait(1.0)
         pyautogui.hotkey("ctrl", "tab")
@@ -414,10 +1247,21 @@ def action_lusrmgr_default_accounts(r: Runner, item: dict[str, Any]) -> list[str
         ]
     captured: list[str] = []
     win = r.open_mmc("lusrmgr.msc", ["本地用户和组", "Local Users and Groups"])
-    r.click(win, 50, 104, 1.0)
+    r.click_text(item, "lusrmgr_users_node", ["用户", "Users"], delay=1.0)
+    r.set_listview_column_widths("lusrmgr_default_accounts_columns", [240, 160, 320])
+    r.require_visible_token_groups(
+        item,
+        "lusrmgr_default_accounts_visible",
+        [["Administrator"], ["DefaultAccount"], ["Guest"], ["WDAGUtilityAccount"]],
+    )
     captured.append(r.shot(names[0]))
     if len(names) > 1:
-        r.double_click(win, 235, 145, 1.0)
+        r.keyboard_search_list_item(item, "lusrmgr_guest_account", "Guest", enter=True, tabs=1, delay=1.0)
+        r.require_visible_token_groups(
+            item,
+            "lusrmgr_guest_properties_disabled_visible",
+            [["Guest"], ["属性", "Properties"], ["账户已禁用", "帐户已禁用", "Account is disabled"]],
+        )
         captured.append(r.shot(names[1]))
     r.kill_ui()
     return captured
@@ -428,7 +1272,7 @@ def action_lusrmgr_extra_accounts(r: Runner, item: dict[str, Any]) -> list[str]:
 
 
 def action_secpol_audit_policy(r: Runner, item: dict[str, Any]) -> list[str]:
-    r.open_secpol_local_child("audit")
+    r.open_secpol_local_child("audit", item)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_secpol_audit_policy.png"))
     r.kill_ui()
     return [path]
@@ -449,7 +1293,7 @@ def action_eventvwr_system_log_properties(r: Runner, item: dict[str, Any]) -> li
     subprocess.Popen([r"C:\Windows\System32\mmc.exe", "eventvwr.msc", "/c:System"])
     r.wait(6.0)
     win = r.maximize(r.wait_window(["事件查看器", "Event Viewer"], 25))
-    r.click(win, 885, 257, 1.0)
+    r.click_text(item, "eventvwr_system_properties", ["属性", "Properties"], delay=1.0)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_eventvwr_system_log_properties.png"))
     r.kill_ui()
     return [path]
@@ -479,8 +1323,8 @@ def action_control_installed_updates(r: Runner, item: dict[str, Any]) -> list[st
 
     if not r.control_panel_location_has(win, tokens):
         # Server 2012 often opens Programs and Features first; use the left
-        # navigation link with coordinates relative to the actual window.
-        r.click(win, 86, 126, 4.0)
+        # navigation link, but require visible UI text before clicking.
+        r.click_text(item, "control_installed_updates_link", ["查看已安装的更新", "View installed updates", "已安装更新", "Installed Updates"], delay=4.0)
         win = r.active_window(titles)
 
     if not r.control_panel_location_has(win, tokens):
@@ -493,33 +1337,35 @@ def action_control_installed_updates(r: Runner, item: dict[str, Any]) -> list[st
 
 def action_services_remote_registry(r: Runner, item: dict[str, Any]) -> list[str]:
     win = r.open_mmc("services.msc", ["服务", "Services"])
-    r.click(win, 410, 145, 0.2)
-    pyautogui.write("Remote Registry", interval=0.02)
-    r.wait(1.0)
-    r.click(win, 430, 278, 0.5)
+    r.click_text(item, "services_remote_registry", ["Remote Registry"], delay=1.0)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_services_remote_registry.png"))
     r.kill_ui()
     return [path]
 
 
 def action_gpedit_idle_session_limit(r: Runner, item: dict[str, Any]) -> list[str]:
-    win = r.open_gpedit_computer_rdsh("session_time_limits")
-    r.double_click(win, 505, 166, 1.0)
+    r.open_gpedit_computer_rdsh("session_time_limits", item)
+    r.click_text(item, "gpedit_idle_session_policy", ["设置活动但空闲的远程桌面服务会话的时间限制", "活动但空闲", "空闲", "Set time limit for active but idle", "idle session"], double=True, delay=1.0, scroll_attempts=8)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_gpedit_idle_session_limit.png"))
     r.kill_ui()
     return [path]
 
 
 def action_gpedit_limit_number_of_connections(r: Runner, item: dict[str, Any]) -> list[str]:
-    win = r.open_gpedit_computer_rdsh("connections")
-    r.double_click(win, 505, 222, 1.0)
+    try:
+        r.open_gpedit_computer_rdsh("connections", item)
+        r.click_text(item, "gpedit_limit_connections_policy", ["限制连接的数量", "Limit number of connections", "MaxInstanceCount"], double=True, delay=1.0, scroll_attempts=8)
+    except EvidenceValidationError as exc:
+        r.log(f"gpedit connections path failed; falling back to all settings: {exc}")
+        r.open_gpedit_computer_all_settings(item)
+        r.click_text(item, "gpedit_limit_connections_policy_all_settings", ["限制连接的数量", "Limit number of connections", "MaxInstanceCount"], double=True, delay=1.0, scroll_attempts=8)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_gpedit_limit_number_of_connections.png"))
     r.kill_ui()
     return [path]
 
 
 def action_secpol_security_options(r: Runner, item: dict[str, Any]) -> list[str]:
-    r.open_secpol_local_child("security")
+    r.open_secpol_local_child("security", item)
     path = r.shot(first_evidence(item, f"row{item['row']:02d}_secpol_security_options.png"))
     r.kill_ui()
     return [path]
@@ -578,6 +1424,7 @@ def run_plan(plan_path: Path, out_dir: Path, only_row: int | None = None, debug:
             runner.log(f"done row={item['row']} evidence={evidence_paths}")
         except Exception as exc:
             runner.log(f"ERROR row={item.get('row')} action={action_name}: {type(exc).__name__}: {exc}")
+            status = "validation_failed" if isinstance(exc, EvidenceValidationError) else "error"
             try:
                 error_name = f"row{int(item['row']):02d}_error_{action_name}.png"
                 error_path = runner.tmp_shot(error_name)
@@ -588,7 +1435,7 @@ def run_plan(plan_path: Path, out_dir: Path, only_row: int | None = None, debug:
             results.append(
                 {
                     "row": item.get("row"),
-                    "status": "error",
+                    "status": status,
                     "action": action_name,
                     "lane": item.get("lane"),
                     "error": f"{type(exc).__name__}: {exc}",

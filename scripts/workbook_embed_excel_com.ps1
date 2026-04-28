@@ -68,17 +68,6 @@ try {
   $findingCol = if ($plan.columns.finding) { [int]$plan.columns.finding } else { 5 }
   $resultCol = if ($plan.columns.result) { [int]$plan.columns.result } else { 6 }
 
-  $worksheet.Columns.Item($findingCol).ColumnWidth = [math]::Max($worksheet.Columns.Item($findingCol).ColumnWidth, 101.5)
-
-  # Remove existing links and drawing objects in the copied workbook so reruns
-  # do not stack stale evidence.
-  while ($worksheet.Hyperlinks.Count -gt 0) {
-    $worksheet.Hyperlinks.Item(1).Delete()
-  }
-  for ($i = $worksheet.Shapes.Count; $i -ge 1; $i--) {
-    $worksheet.Shapes.Item($i).Delete()
-  }
-
   foreach ($item in $plan.items) {
     $row = [int]$item.row
     $cell = $worksheet.Cells.Item($row, $findingCol)
@@ -97,13 +86,10 @@ try {
     }
 
     $cell.Value2 = $finding.Trim()
-    $cell.WrapText = $true
-    $cell.VerticalAlignment = -4160 # xlTop
 
     if ($status) {
       $resultCell = $worksheet.Cells.Item($row, $resultCol)
       $resultCell.Value2 = $status
-      $resultCell.WrapText = $true
     }
 
     if ($evidence.Count -eq 0) {
@@ -116,7 +102,6 @@ try {
     $textArea = 76.0
     $left = $cell.Left + 12.0
     $top = $cell.Top + $textArea
-    $maxPlacedHeight = 0.0
 
     foreach ($name in $evidence) {
       $imagePath = Join-Path $EvidenceDir $name
@@ -124,6 +109,7 @@ try {
         continue
       }
       $shape = $worksheet.Shapes.AddPicture($imagePath, $false, $true, $left, $top, -1, -1)
+      $shape.AlternativeText = "vm-windows-security-audit evidence"
       $scale = [math]::Min($maxWidth / $shape.Width, $maxHeight / $shape.Height)
       if ($scale -lt 1) {
         $shape.Width = $shape.Width * $scale
@@ -131,13 +117,6 @@ try {
       }
       $shape.Placement = 1 # xlMoveAndSize
       $left += $shape.Width + 18.0
-      if ($shape.Height -gt $maxPlacedHeight) {
-        $maxPlacedHeight = $shape.Height
-      }
-    }
-
-    if ($maxPlacedHeight -gt 0) {
-      $worksheet.Rows.Item($row).RowHeight = [math]::Max($worksheet.Rows.Item($row).RowHeight, ($textArea + $maxPlacedHeight + 18.0))
     }
   }
 

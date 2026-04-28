@@ -2,115 +2,95 @@
 
 [English](README.en.md)
 
-`vm-windows-security-audit` 是一个通用 agent skill 脚手架，用于根据安全检查表审查 VMware 中的 Windows 虚拟机。
+`vm-windows-security-audit` 用于根据 Windows 安全检查表审查 VMware 虚拟机。它会读取 `.xlsx` 检查表，在虚拟机中打开对应的 Windows 管理界面，逐项采集截图证据，并可按需生成带截图的 Excel 报告。
 
-它使用 `vmrun`、VMware Tools 和来宾机内的 PyAutoGUI 操作真实 Windows 图形界面，保存原始截图证据，并可按需生成带截图证据的 Excel 检查报告。
+## 适用场景
 
-## 功能
+- Windows Server 安全基线检查。
+- 需要按照表格逐项截图取证的审查任务。
+- VMware Workstation 虚拟机中的 Windows 系统检查。
+- 需要保留原始 GUI 证据，而不是只导出命令结果的任务。
 
-- 分析 `.xlsx` 安全检查表，并把检查行映射到 GUI 审查动作。
-- 打开 `secpol.msc`、`gpedit.msc`、`lusrmgr.msc`、`services.msc`、`eventvwr.msc`、`fsmgmt.msc`、`regedit` 等 Windows 管理工具。
-- 按行保存截图证据，例如 `row11_gpedit_rdp_client_connection_encryption_level.png`。
-- 当检查项要求图形化验证时，优先使用 GUI 截图，不用命令输出替代。
-- 对未命中已知模式的行，支持基于上下文的自适应 GUI 操作。
-- 来宾机缺少 Python 或 PyAutoGUI 环境时，可使用仓库内置离线包自动准备审查所需依赖。
-- 可选：复制原始表格并把截图直接嵌入 `检查情况` 列。
+## 功能概览
 
-## 主流程
+- 自动分析 `.xlsx` 检查表，识别检查项、预期结果和操作说明。
+- 支持常见 Windows 管理界面，包括本地安全策略、组策略、本地用户和组、服务、事件查看器、共享文件夹、注册表和控制面板。
+- 按检查表行号保存截图证据，例如 `row11_gpedit_rdp_client_connection_encryption_level.png`。
+- 对截图进行基础有效性和页面内容检查，减少截图页面与检查项不匹配的问题。
+- 支持离线准备虚拟机中的 Python 和 GUI 自动化依赖。
+- 可选生成 Excel 报告，把截图嵌入到检查结果列。
 
-```text
-vmrun + VMware Tools + guest-side PyAutoGUI + Excel
-```
+## 使用前准备
 
-VMware MCP 可以作为可选辅助，但不是必要依赖。
+宿主机需要：
 
-`scripts/*.py` 是 skill 工作流内部组件，不作为用户直接调用入口。需要执行审查时应由 skill 工作流或 `scripts/host_orchestrator.ps1` 统一调度，Python 脚本由流程自行调用。
+- Windows 系统。
+- VMware Workstation 或兼容的 `vmrun.exe`。
+- 可访问目标虚拟机的 `.vmx` 文件。
+- 可访问源检查表 `.xlsx`。
+- 如果需要生成嵌图版 Excel 报告，需要安装 Microsoft Excel。
 
-## 目录结构
+虚拟机需要：
 
-```text
-vm-windows-security-audit-skill-sample/
-├── SKILL.md
-├── README.md
-├── README.en.md
-├── agents/openai.yaml
-├── offline/
-│   ├── python-3.9.13-amd64.exe
-│   ├── requirements-guest-py39.txt
-│   ├── install_guest_offline.ps1
-│   ├── MANIFEST.json
-│   └── wheelhouse/
-├── references/
-│   ├── check_patterns.json
-│   ├── evidence_rules.md
-│   ├── gui_adaptive_rules.md
-│   └── troubleshooting.md
-└── scripts/
-    ├── analyze_checklist.py
-    ├── guest_gui_runner.py
-    ├── guest_preflight.py
-    ├── guest_setup_pyautogui.ps1
-    ├── host_orchestrator.ps1
-    ├── workbook_embed_excel_com.ps1
-    └── workbook_output.py
-```
+- Windows 系统。
+- VMware Tools 正常运行。
+- 已登录到桌面。
+- 提供用于检查的 guest 用户名和密码。
 
-## 环境要求
+## 工作流程
 
-宿主机：
+1. 读取检查表并生成检查计划。
+2. 检查虚拟机环境和桌面状态。
+3. 准备虚拟机中的运行环境。
+4. 逐项打开对应的 Windows 管理界面。
+5. 采集并校验截图证据。
+6. 保存最终截图。
+7. 如果用户需要，生成带截图的 Excel 报告。
 
-- Windows 宿主机，安装 VMware Workstation 或兼容的 `vmrun.exe`。
-- 来宾机中 VMware Tools 可用。
-- 如需高保真嵌图报告，宿主机需要安装 Microsoft Excel。
+## 输出内容
 
-来宾机：
-
-- Windows 虚拟机，有可交互桌面会话。
-- 有权限执行审查的来宾账号。
-- Python 和 GUI 自动化依赖可由脚本自动检测和安装。
-- 仓库内置 `offline/` 离线包，包含 Python 3.9.13 x64 安装器和 PyAutoGUI 依赖 wheelhouse。
-- 在线环境可复用已有 Python 或使用 winget；无网络系统可直接使用 `offline/install_guest_offline.ps1`。
-
-自动准备的来宾依赖包括：
+默认输出在源检查表同级目录，文件名会包含任务标签。
 
 ```text
-pyautogui
-pillow
-pyperclip
-pygetwindow
-```
-
-环境准备脚本：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/guest_setup_pyautogui.ps1
-```
-
-无网络来宾机可使用：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File offline/install_guest_offline.ps1
-```
-
-## 输出规范
-
-```text
+Windows完整检查_<task_label>_证据\
 <source_workbook_stem>_<task_label>.xlsx
-Windows完整检查_<task_label>_证据
-Windows完整检查_<task_label>_执行计划.json
 ```
 
-截图命名：
+证据截图命名格式：
 
 ```text
 rowNN_<tool>_<check_key>.png
 ```
 
-任务完成后，证据目录中应只剩可交付的最终截图；运行日志、诊断数据和其他临时文件由流程自动清理。
+最终证据目录中主要包含可用于交付的截图文件。报告文件只在用户要求生成时创建。
 
-补丁检查会进入“已安装更新”页面取证，确保截图能看到 Windows 更新/KB 列表，而不是普通的软件列表页。
+## 当前覆盖范围
+
+已内置的常见检查包括：
+
+- 本地安全策略：密码策略、账户锁定策略、审核策略、安全选项。
+- 组策略：远程桌面加密级别、空闲会话限制、连接数限制。
+- 本地用户和组：用户列表、默认账户、Guest 属性、Administrators 成员。
+- 服务：Remote Registry 等服务配置。
+- 事件查看器：System 日志及属性页。
+- 共享文件夹、LSA 注册表项、已安装更新页面。
+- 身份信息、管理员认证方式等需要可见窗口展示的辅助检查。
+
+## 目录结构
+
+```text
+vm-windows-security-audit/
+├── SKILL.md
+├── README.md
+├── README.en.md
+├── agents/
+├── offline/
+├── references/
+└── scripts/
+```
 
 ## 说明
 
-- 生成 workbook、超链接、压缩包都是可选行为，只在需要时执行。
-- 当前 GUI 导航主要围绕 Windows Server 2012 风格 MMC 窗口整理，其他 Windows 版本或显示缩放可能需要调整。
+- 原始检查表不会被直接修改。
+- Excel 报告、超链接和压缩包属于可选输出。
+- 不同 Windows 版本、语言和显示缩放可能导致部分 GUI 路径需要适配。

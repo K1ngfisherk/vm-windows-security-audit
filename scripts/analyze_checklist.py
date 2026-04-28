@@ -40,6 +40,11 @@ TOOL_HINTS = [
     ("control", ["control", "控制面板", "已安装更新", "添加删除程序", "程序和功能"]),
 ]
 
+KEYWORD_STOPWORDS = {
+    "应", "应当", "检查", "核查", "测评", "要求", "是否", "进行", "相关", "系统", "用户", "管理", "配置",
+    "the", "and", "for", "with", "shall", "should", "check", "verify",
+}
+
 
 def norm(value: Any) -> str:
     if value is None:
@@ -105,6 +110,38 @@ def infer_tool(text: str) -> str | None:
     return None
 
 
+def extract_keywords(data: dict[str, str], pattern: dict[str, Any] | None) -> list[str]:
+    """Extract UI navigation/validation keywords from the checklist row text."""
+    combined = " ".join(data.get(k, "") for k in ("item", "expected", "operation", "remediation", "category"))
+    combined_lower = lower_text(combined)
+    keywords: list[str] = []
+
+    if pattern:
+        for token in pattern.get("match", {}).get("any", []):
+            token = norm(token)
+            if token and "?" not in token and lower_text(token) in combined_lower:
+                keywords.append(token)
+
+    for token in re.findall(r"[\u4e00-\u9fffA-Za-z0-9_$\\.-]{2,}", combined):
+        token = norm(token)
+        token_lower = lower_text(token)
+        if token_lower in KEYWORD_STOPWORDS:
+            continue
+        if len(token) > 18 and not re.search(r"[A-Za-z0-9_$\\.-]", token):
+            continue
+        keywords.append(token)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for token in keywords:
+        key = lower_text(token)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(token)
+    return deduped[:20]
+
+
 def evidence_names(row: int, pattern: dict[str, Any] | None, tool: str | None) -> list[str]:
     if pattern:
         slugs = [pattern["evidence_slug"]]
@@ -165,6 +202,7 @@ def plan_rows(workbook: Path, patterns_path: Path, task_label: str) -> dict[str,
                 "gui_action": action,
                 "graphical_required": True if not pattern else bool(pattern.get("graphical_required", True)),
                 "evidence": evidence_names(row, pattern, tool),
+                "keywords": extract_keywords(data, pattern),
                 "source": data,
                 "notes": pattern.get("notes") if pattern else "Use adaptive GUI rules; do not skip by default.",
             }
@@ -193,6 +231,9 @@ def main() -> None:
     parser.add_argument("--task-label", required=True)
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
+
+    if args.out.parent.name.lower() != "tmp":
+        raise SystemExit("Execution plan JSON must be written under an evidence tmp directory, for example <evidence>/tmp/plan.json")
 
     plan = plan_rows(args.workbook, args.patterns, args.task_label)
     args.out.parent.mkdir(parents=True, exist_ok=True)

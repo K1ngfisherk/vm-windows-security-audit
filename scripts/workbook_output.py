@@ -31,7 +31,6 @@ def col_letter(index: int) -> str:
 
 def write_text(cell: Any, text: str) -> None:
     cell.value = text.strip() if text else ""
-    cell.alignment = openpyxl.styles.Alignment(wrap_text=True, vertical="top")
 
 
 def strip_evidence_text(value: Any) -> str:
@@ -80,8 +79,6 @@ def main() -> None:
     finding_col = int(plan["columns"].get("finding") or 5)
     result_col = int(plan["columns"].get("result") or 6)
 
-    ws.column_dimensions[col_letter(finding_col)].width = max(ws.column_dimensions[col_letter(finding_col)].width or 20, 72)
-
     for item in plan["items"]:
         row = int(item["row"])
         finding = item.get("finding") or item.get("observed") or strip_evidence_text(ws.cell(row, finding_col).value)
@@ -101,7 +98,6 @@ def main() -> None:
 
         left_anchor = f"{col_letter(finding_col)}{row}"
         max_image_height = 245 if len(evidence) > 1 else 320
-        ws.row_dimensions[row].height = max(ws.row_dimensions[row].height or 20, (max_image_height * 0.75) + 72)
 
         for index, name in enumerate(evidence):
             image_path = args.evidence_dir / name

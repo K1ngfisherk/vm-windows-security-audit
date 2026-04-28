@@ -13,7 +13,9 @@ Use this skill to run Windows security checklist work against a VMware guest wit
 - Treat graphical evidence as the source of truth when the checklist asks for GUI inspection.
 - Do not use command output to replace a required GUI screenshot.
 - Process checklist rows sequentially: finish and verify the current row screenshot before moving to the next row.
+- Before any PyAutoGUI click that navigates a GUI, derive keywords from the input checklist row and confirm matching visible UI text; do not rely on inherited Server-version coordinates alone.
 - Leave the original workbook untouched. If report output is requested, write a copied workbook only.
+- Preserve workbook layout and formatting by default: do not change sheet structure, merged cells, row heights, column widths, colors, fills, fonts, borders, alignment, existing shapes, or hyperlinks unless the user explicitly asks for formatting/layout changes.
 - Do not create zip packages, workbook hyperlinks, or workbook output unless the user asks for them.
 
 ## Inputs
@@ -49,14 +51,18 @@ If any required path or credential is missing and cannot be inferred, ask one co
    - Load `references/check_patterns.json` for known checks.
    - Identify columns such as `分类`, `测评项`, `预期结果`, `评估操作示例`, `检查情况`, `结果`, `整改建议`.
    - Produce an execution plan with row numbers, check ids, evidence filenames, and confidence.
+   - The execution plan JSON is runtime data: write it only under `Windows完整检查_<task_label>_证据/tmp/plan.json`, never next to the workbook, and delete it with `tmp` when the run completes.
 
 4. Execute checks:
    - For known checks, call the mapped GUI action.
    - For inferred checks, open the tool named or implied by the row.
    - For unmatched checks, use the adaptive GUI rules in `references/gui_adaptive_rules.md`.
+   - Extract row keywords from fields such as `测评项`, `预期结果`, `评估操作示例`, and `整改建议`; use UI Automation text to find/confirm the target before clicking.
    - Screenshot each row as `rowNN_<tool>_<check_key>.png`.
    - Put only final accepted screenshots in the evidence directory root.
    - Put runner logs, stdout/stderr captures, visible-command helper scripts, runtime JSON files, validation JSON, contact sheets, and diagnostic/error screenshots in `evidence/tmp`.
+   - For LSA `restrictanonymous` evidence, expand the registry value list columns so `restrictanonymous`, `restrictanonymoussam`, their type, and their displayed data are readable before taking the final screenshot.
+   - For default-account evidence, expand the Local Users and Groups `Users` list name column so `Administrator`, `DefaultAccount`, `Guest`, and `WDAGUtilityAccount` are readable before taking the final screenshot; Guest disabled evidence must show the Guest properties dialog and disabled checkbox/status.
 
 5. Verify evidence:
    - Check that the screenshot is not blank.
@@ -70,7 +76,7 @@ If any required path or credential is missing and cannot be inferred, ask one co
    - Delete `evidence/tmp` at task completion unless the user explicitly asks to keep diagnostics for troubleshooting.
    - Do not place runtime JSON files such as `plan.json`, `runner_result.json`, or `image_validation.json` in the evidence root or guest work root; stage them under `evidence/tmp` and clean them with the rest of tmp.
    - Only write Excel when requested.
-   - For embedded-image output, prefer `scripts/workbook_embed_excel_com.ps1` on Windows hosts with Excel installed; insert screenshots directly into the detected `检查情况` column and remove filename/link wording.
+   - For embedded-image output, prefer `scripts/workbook_embed_excel_com.ps1` on Windows hosts with Excel installed; insert screenshots directly into the detected `检查情况` column and remove filename/link wording without changing workbook styling or layout unless explicitly requested.
 
 ## Output Naming
 
@@ -78,10 +84,10 @@ Use sibling outputs next to the source workbook unless the user specifies otherw
 
 - Workbook: `<source_workbook_stem>_<task_label>.xlsx`
 - Evidence directory: `Windows完整检查_<task_label>_证据`
-- Plan: `Windows完整检查_<task_label>_执行计划.json`
+- Runtime plan: `Windows完整检查_<task_label>_证据/tmp/plan.json` only; it is not a final output.
 
 Do not add timestamps or nested final-evidence folders to final output names unless the user asks.
-Do not leave intermediate files in the final evidence directory. Use `Windows完整检查_<task_label>_证据/tmp` only as a temporary staging area for logs, helper scripts, diagnostic screenshots, and runtime JSON files, then remove it when the run is complete.
+Do not leave intermediate files in the final evidence directory. Use `Windows完整检查_<task_label>_证据/tmp` only as a temporary staging area for the execution plan, logs, helper scripts, diagnostic screenshots, and runtime JSON files, then remove it when the run is complete.
 
 ## Matching And Adaptation
 
@@ -143,6 +149,7 @@ Before final response:
 - All supported checklist rows have accepted screenshot evidence or a clear blocker.
 - Evidence filenames follow the row naming contract.
 - Workbook output, if requested, is a copied workbook and not the original.
+- Workbook output preserves the source workbook's structure, colors, fills, row/column sizes, borders, fonts, alignment, existing shapes, and hyperlinks unless the user explicitly requested formatting/layout changes.
 - Embedded-image output has no `截图:`, `证据:`, `rowNN_`, or hyperlink remnants in the check-result cells.
 - The final evidence directory contains only accepted final screenshots; no `tmp` directory, runner logs, stdout/stderr text, runtime JSON files, validation JSON, contact sheets, or helper scripts remain unless diagnostics were explicitly kept.
 - Report whether any rows were adaptive, unsupported, or manually confirmed.

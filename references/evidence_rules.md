@@ -75,5 +75,7 @@ When the user requests embedded evidence:
 
 - RDP encryption level checks: use the graphical policy page when available. Do not use `MinEncryptionLevel`, `SecurityLayer`, or similar runtime values as replacement evidence.
 - Default account checks: if checking whether Guest is disabled, open the Guest properties dialog.
+- LSA `restrictanonymous` checks: expand the registry value list columns before capture so `restrictanonymous`, `restrictanonymoussam`, type, and displayed data are readable in the screenshot.
+- Default account list checks: expand the Local Users and Groups `Users` list name column before capture so `Administrator`, `DefaultAccount`, `Guest`, and `WDAGUtilityAccount` are readable; the Guest disabled screenshot must show the Guest properties dialog and disabled checkbox/status.
 - Security Options checks: for "do not display last username" and "clear virtual memory pagefile", use the Local Security Policy Security Options page when available. Do not add registry evidence if the GUI proves the item.
 - Installed updates checks: use the `已安装更新` / `Installed Updates` page under Programs and Features. The final screenshot must show that page title or breadcrumb plus the Windows update list/KB entry area. Do not accept the plain `卸载或更改程序` / installed-programs list as evidence for patch location.
