@@ -1,7 +1,7 @@
 interface:
-  display_name: "VM Windows Security Audit"
-  short_description: "Audit VMware Windows VMs with GUI evidence"
+  display_name: "VM & SSH Security Audit"
+  short_description: "Run fast VM checks, optional screenshots, and copied reports"
   brand_color: "#2563EB"
-  default_prompt: "Use $vm-windows-security-audit to audit this VMware Windows VM against my checklist and collect GUI screenshot evidence."
+  default_prompt: "Use $vm-windows-security-audit for Windows VMware and Linux/Unix security checks. Default to no screenshots for speed. For Linux/Unix, ask for SSH IP plus account credentials first and use SSH by default; use vmrun direct commands only when the user says SSH is unavailable or cannot be provided. Enable GUI/SSH screenshot evidence only when the user asks for screenshots, evidence, or capture proof. Windows GUI evidence must be native Windows GUI pages/dialogs, never PowerShell/cmd/Terminal/rendered command-output substitutes; if native GUI capture is blocked, stop and ask the user. Write copied checklist reports only when requested. When a report depends on runner_result.json, keep host tmp until the workbook is written and validated, then clean tmp last."
 policy:
   allow_implicit_invocation: true

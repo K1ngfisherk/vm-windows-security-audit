@@ -1,14 +1,20 @@
 # Evidence Rules
 
+## Screenshot Mode
+
+- Screenshot collection is optional and off by default.
+- Enable screenshots only when the user asks for screenshots, evidence, capture proof, or similar wording.
+- When screenshot mode is off, do not create placeholder screenshot filenames; use command/text output or workbook-only results.
+
 ## Directory And Names
 
 - Final evidence directory: `Windows完整检查_<task_label>_证据`.
-- Put final screenshots directly in that directory.
+- Put final screenshots directly in that directory when screenshot mode is enabled.
 - Put all intermediate files under `Windows完整检查_<task_label>_证据/tmp`.
 - Put runtime JSON files such as `plan.json`, `runner_result.json`, and `image_validation.json` under `tmp`; never leave them in the evidence root.
-- Delete `tmp` after task completion unless the user explicitly asks to keep diagnostics.
+- If workbook output is requested, keep host `tmp` until `runner_result.json` has been merged into the copied workbook and the written `检查情况`/`结果` values have been validated; delete `tmp` only after that report check passes unless the user explicitly asks to keep diagnostics.
 - Do not use timestamped final folders or nested `最终截图证据` folders unless requested.
-- The final evidence directory root should contain accepted final screenshots only, not logs, stdout/stderr captures, runtime JSON files, JSON diagnostics, helper scripts, contact sheets, or preview files.
+- The final evidence directory root should contain accepted final screenshots only when screenshot mode is enabled, not logs, stdout/stderr captures, runtime JSON files, JSON diagnostics, helper scripts, contact sheets, or preview files.
 - Screenshot filenames:
   - Lowercase ASCII.
   - Prefix with workbook row number: `rowNN_`.
@@ -29,10 +35,12 @@ row16_services_mysql_logon_account.png
 Accept a screenshot only when it proves the row:
 
 - The target GUI window is visible.
+- For Windows checklist GUI evidence, the foreground window is the native Windows management page or dialog for that row, such as Local Security Policy, Local Users and Groups, Event Viewer, Services, Registry Editor, Control Panel, or an MMC properties dialog.
 - The relevant tree path, tab, policy name, account name, service name, or registry key is visible.
 - The target value/status is visible.
 - Important keywords are not truncated.
 - The image is not black, blank, covered by a modal error, or on the wrong account/session.
+- The image is not PowerShell, cmd/Command Prompt, Windows Terminal, rendered text, command output, or a synthetic PNG standing in for the native GUI page.
 
 If text is truncated:
 
@@ -46,7 +54,8 @@ If text is truncated:
 
 - If the checklist row requests or implies GUI inspection, the final evidence must be GUI.
 - Commands may help discover a service name, registry path, policy name, or installed component.
-- Command output does not replace GUI evidence unless the row has no GUI route or the user explicitly allows it.
+- Command output never replaces native Windows GUI evidence unless the user explicitly authorizes command-window evidence for that exact row after being told the native GUI blocker.
+- If the native GUI route hangs, cannot be verified, or cannot produce proof, stop and ask the user before substituting another evidence type.
 
 ## Workbook Output
 

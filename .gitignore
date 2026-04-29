@@ -1,4 +1,6 @@
 __pycache__/
+ssh-evidence/
+Evidence/
 *.py[cod]
 *.log
 *.tmp
@@ -6,3 +8,5 @@ __pycache__/
 *.zip
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/

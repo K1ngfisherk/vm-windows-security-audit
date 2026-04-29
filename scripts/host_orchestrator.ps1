@@ -13,7 +13,9 @@ param(
   [int]$PollSeconds = 5,
   [int]$TimeoutSeconds = 900,
   [switch]$SkipInteractiveDesktopCheck,
-  [switch]$KeepTmp
+  [switch]$KeepTmp,
+  [switch]$DeferHostTmpCleanup,
+  [switch]$Screenshots
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,7 +39,7 @@ $hostPlanParentPath = [System.IO.Path]::GetFullPath([System.IO.Path]::GetDirecto
 if (-not $hostPlanParentPath.Equals($hostTmpFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
   throw "HostPlanJson must be staged under the current evidence tmp directory so it is destroyed with runtime files: $hostTmpFullPath"
 }
-$hostPlanText = Get-Content -LiteralPath $hostPlanFullPath -Raw
+$hostPlanText = Get-Content -LiteralPath $hostPlanFullPath -Raw -Encoding UTF8
 $RunAsGuestUser = if ([string]::IsNullOrWhiteSpace($InteractiveGuestUser)) { $GuestUser } else { $InteractiveGuestUser }
 $script:GuestTempCmdScripts = [System.Collections.Generic.List[string]]::new()
 $script:InteractiveGuestTasks = [System.Collections.Generic.List[object]]::new()
@@ -96,6 +98,14 @@ function Get-SafeName {
   param([string]$Name)
   return ($Name -replace '[^A-Za-z0-9_.-]', '_')
 }
+
+function Join-Codepoints {
+  param([int[]]$Codepoints)
+  return -join ($Codepoints | ForEach-Object { [char]$_ })
+}
+
+$AdminInterviewFinding = Join-Codepoints @(0x6D89,0x53CA,0x8BBF,0x8C08,0x7BA1,0x7406,0x5458,0xFF0C,0x672A,0x8FDB,0x884C,0x64CD,0x4F5C)
+$AdminInterviewResult = Join-Codepoints @(0x672A,0x68C0,0x67E5)
 
 function Remove-GuestFileIfExists {
   param([string]$Path)
@@ -318,6 +328,51 @@ New-Item -ItemType Directory -Force -Path $hostTmp | Out-Null
 $hostTmpPlanJson = Join-Path $hostTmp "plan.json"
 [System.IO.File]::WriteAllText($hostTmpPlanJson, $hostPlanText, [System.Text.UTF8Encoding]::new($false))
 
+if (-not $Screenshots) {
+  $plan = $hostPlanText | ConvertFrom-Json
+  $results = @()
+  foreach ($item in @($plan.items)) {
+    if ($item.gui_action -eq "skip_admin_interview" -or $item.check_id -eq "admin_interview") {
+      $results += [pscustomobject]@{
+        row = $item.row
+        status = "skipped"
+        skip_reason = "administrator_interview"
+        action = $item.gui_action
+        lane = $item.lane
+        finding = if ($item.finding) { $item.finding } else { $AdminInterviewFinding }
+        result = if ($item.result) { $item.result } else { $AdminInterviewResult }
+        evidence = @()
+      }
+    } else {
+      $results += [pscustomobject]@{
+        row = $item.row
+        status = "not_run"
+        action = $item.gui_action
+        lane = $item.lane
+        evidence = @()
+        note = "screenshots_disabled"
+      }
+    }
+  }
+  $result = [pscustomobject]@{
+    screenshots = $false
+    results = $results
+    log = $null
+    tmp_dir = $hostTmp
+  }
+  $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $hostTmp "runner_result.json") -Encoding UTF8
+  if (-not $KeepTmp -and -not $DeferHostTmpCleanup) {
+    Remove-HostTmp -EvidenceDir $HostEvidenceDir -TmpDir $hostTmp
+  }
+  $skippedCount = @($results | Where-Object { $_.status -eq "skipped" }).Count
+  $notRunCount = @($results | Where-Object { $_.status -eq "not_run" }).Count
+  Write-Host "Screenshot collection disabled by default. Rows not run: $notRunCount; skipped administrator-interview rows: $skippedCount. No guest GUI work was run."
+  if ($DeferHostTmpCleanup) {
+    Write-Host "Host tmp preserved for workbook output: $hostTmp"
+  }
+  exit 0
+}
+
 if (-not $SkipInteractiveDesktopCheck) {
   Assert-InteractiveDesktopReady -HostSnapshotPath (Join-Path $hostTmp "guest_processes_before_gui.txt")
 }
@@ -389,7 +444,7 @@ try {
   }
   $hostPreflightJson = Join-Path $hostTmp "preflight.json"
   Invoke-Vmrun -gu $GuestUser -gp $GuestPassword copyFileFromGuestToHost $Vmx $preflightJson $hostPreflightJson
-  $preflightText = Get-Content -LiteralPath $hostPreflightJson -Raw
+  $preflightText = Get-Content -LiteralPath $hostPreflightJson -Raw -Encoding UTF8
   try {
     $preflight = $preflightText | ConvertFrom-Json
   } catch {
@@ -441,7 +496,7 @@ try {
 
   $hostResultJson = Join-Path $hostTmp "runner_result.json"
   Invoke-Vmrun -gu $GuestUser -gp $GuestPassword copyFileFromGuestToHost $Vmx $resultJson $hostResultJson
-  $result = Get-Content -LiteralPath $hostResultJson -Raw | ConvertFrom-Json
+  $result = Get-Content -LiteralPath $hostResultJson -Raw -Encoding UTF8 | ConvertFrom-Json
 } finally {
   Remove-InteractiveGuestTask -Task $runnerTask
 }
@@ -463,7 +518,7 @@ foreach ($entry in $result.results) {
 }
 Remove-TrackedGuestArtifacts
 
-$failedRows = @($result.results | Where-Object { $_.status -ne "captured" } | ForEach-Object { "row$($_.row): $($_.error)" })
+$failedRows = @($result.results | Where-Object { $_.status -notin @("captured", "skipped") } | ForEach-Object { "row$($_.row): $($_.error)" })
 
 if ($KeepTmp -or $failedRows.Count -gt 0) {
   Copy-GuestTmpDiagnostics -GuestTmpPath $guestTmp -HostTmpPath $hostTmp
@@ -476,7 +531,11 @@ if (-not $KeepTmp -and $failedRows.Count -eq 0) {
     "rmdir /s /q $guestTmpArg 2>nul",
     "exit /b 0"
   )
-  Remove-HostTmp -EvidenceDir $HostEvidenceDir -TmpDir $hostTmp
+  if (-not $DeferHostTmpCleanup) {
+    Remove-HostTmp -EvidenceDir $HostEvidenceDir -TmpDir $hostTmp
+  } else {
+    Write-Host "Host tmp preserved for workbook output: $hostTmp"
+  }
 }
 
 if ($failedRows.Count -gt 0) {

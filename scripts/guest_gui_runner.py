@@ -32,6 +32,8 @@ except Exception:  # pragma: no cover - optional dependency guard for damaged gu
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.12
 CREATE_NEW_CONSOLE = 0x00000010
+ADMIN_INTERVIEW_FINDING = "涉及访谈管理员，未进行操作"
+ADMIN_INTERVIEW_RESULT = "未检查"
 
 UIA_DUMP_SCRIPT = r"""
 $ErrorActionPreference = "SilentlyContinue"
@@ -102,6 +104,21 @@ $result | ConvertTo-Json -Compress -Depth 4
 
 class EvidenceValidationError(RuntimeError):
     """Raised when a screenshot exists but does not prove the requested row."""
+
+
+class UserConfirmationRequiredError(EvidenceValidationError):
+    """Raised when the only available path would violate the evidence contract."""
+
+
+COMMAND_WINDOW_TITLE_TOKENS = (
+    "windows powershell",
+    "powershell",
+    "windows terminal",
+    "command prompt",
+    "cmd.exe",
+    "命令提示符",
+    "_visible",
+)
 
 
 SEMANTIC_RULES: list[tuple[str, dict[str, Any]]] = [
@@ -194,14 +211,6 @@ SEMANTIC_RULES: list[tuple[str, dict[str, Any]]] = [
     }),
     ("control_installed_updates", {
         "must_any": ["installed updates", "已安装更新", "已安装的更新"],
-        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
-    }),
-    ("identity_users", {
-        "must_any": ["identity_users_visible", "row"],
-        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
-    }),
-    ("admin_auth_method", {
-        "must_any": ["admin_auth_method_visible", "row"],
         "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
     }),
 ]
@@ -886,7 +895,7 @@ class Runner:
                 return rule
         return None
 
-    def validate_candidate(self, filename: str, image: Any) -> dict[str, Any]:
+    def validate_candidate(self, filename: str, image: Any, *, allow_command_window: bool = False) -> dict[str, Any]:
         stats = self.image_stats(image)
         snapshot = self.window_snapshot()
         ui_elements = self.uia_elements()
@@ -900,6 +909,13 @@ class Runner:
         failures: list[str] = []
         if not stats["image_usable"]:
             failures.append(f"blank_or_low_information_image stats={stats}")
+        active_title = snapshot.get("active_title", "").casefold()
+        command_window_hits = [token for token in COMMAND_WINDOW_TITLE_TOKENS if token in active_title]
+        if command_window_hits and not allow_command_window:
+            failures.append(
+                "non_native_gui_command_window_active="
+                f"{snapshot.get('active_title', '')!r}; ask_user_before_using_command_window_evidence"
+            )
         if rule:
             must_any = [token.casefold() for token in rule.get("must_any", [])]
             must_all_any = [[token.casefold() for token in group] for group in rule.get("must_all_any", [])]
@@ -919,10 +935,11 @@ class Runner:
             "image": stats,
             "active_title": snapshot["active_title"],
             "window_titles": [w["title"] for w in snapshot["windows"]],
+            "command_window_evidence_allowed": allow_command_window,
             "matched_ui_text_sample": ui_text[:500],
         }
 
-    def shot(self, filename: str, *, final: bool = True) -> str:
+    def shot(self, filename: str, *, final: bool = True, allow_command_window: bool = False) -> str:
         root = self.out_dir if final else self.tmp_dir
         target = root / Path(filename).name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -931,7 +948,7 @@ class Runner:
         if final:
             candidate = self.tmp_dir / f"candidate_{target.name}"
             image.save(candidate)
-            validation = self.validate_candidate(target.name, image)
+            validation = self.validate_candidate(target.name, image, allow_command_window=allow_command_window)
             validation_path = self.tmp_dir / f"{target.stem}.validation.json"
             validation_path.write_text(json.dumps(validation, ensure_ascii=False, indent=2), encoding="utf-8")
             self.log(f"validation {target.name} {json.dumps(validation, ensure_ascii=False)}")
@@ -987,7 +1004,17 @@ class Runner:
         self.wait(4.0)
         return self.maximize(self.wait_window(["注册表编辑器", "Registry Editor"]))
 
-    def visible_cmd(self, row: int, name: str, commands: list[str], filename: str) -> list[str]:
+    def command_window_evidence_allowed(self, item: dict[str, Any]) -> bool:
+        value = item.get("allow_command_window_evidence") or item.get("explicit_command_window_evidence")
+        return str(value).casefold() in {"1", "true", "yes", "y"}
+
+    def visible_cmd(self, item: dict[str, Any], name: str, commands: list[str], filename: str) -> list[str]:
+        row = int(item["row"])
+        if not self.command_window_evidence_allowed(item):
+            raise UserConfirmationRequiredError(
+                f"Row {row} would require command-window evidence ({name}), but Windows screenshot evidence must be a native GUI page. "
+                "Stop and ask the user whether to authorize command-window evidence or provide a manual/native-GUI path."
+            )
         self.kill_ui()
         bat = self.tmp_dir / f"row{row:02d}_{name}_visible.cmd"
         lines = [
@@ -1010,7 +1037,7 @@ class Runner:
             self.maximize(win)
         except Exception as exc:
             self.log(f"visible cmd window not found: {exc!r}")
-        return [self.shot(filename)]
+        return [self.shot(filename, allow_command_window=True)]
 
     def open_secpol_account_child(self, child: str, item: dict[str, Any]) -> Any:
         win = self.open_mmc("secpol.msc", ["本地安全策略", "Local Security Policy"])
@@ -1086,7 +1113,7 @@ class Runner:
     def adaptive_open_and_capture(self, item: dict[str, Any]) -> list[str]:
         tool = str(item.get("tool") or "control").split(";")[0]
         if tool in {"cmd", "powershell"}:
-            return self.visible_cmd(item["row"], item.get("check_id") or "adaptive", ["whoami"], item["evidence"][0])
+            return self.visible_cmd(item, item.get("check_id") or "adaptive", ["whoami"], item["evidence"][0])
         if tool == "regedit":
             subprocess.Popen([r"C:\Windows\regedit.exe"])
             self.wait(3)
@@ -1124,7 +1151,7 @@ def all_evidence(item: dict[str, Any]) -> list[str]:
 
 def action_identity_users(r: Runner, item: dict[str, Any]) -> list[str]:
     return r.visible_cmd(
-        item["row"],
+        item,
         "identity_users",
         [
             "whoami",
@@ -1173,7 +1200,7 @@ def action_lusrmgr_users(r: Runner, item: dict[str, Any]) -> list[str]:
 
 def action_admin_auth_method(r: Runner, item: dict[str, Any]) -> list[str]:
     return r.visible_cmd(
-        item["row"],
+        item,
         "admin_auth_method",
         [
             "whoami",
@@ -1408,6 +1435,21 @@ def run_plan(plan_path: Path, out_dir: Path, only_row: int | None = None, debug:
         if only_row is not None and item["row"] != only_row:
             continue
         action_name = item.get("gui_action") or "adaptive_gui"
+        if action_name == "skip_admin_interview" or item.get("check_id") == "admin_interview":
+            runner.log(f"skip row={item['row']} reason=administrator_interview")
+            results.append(
+                {
+                    "row": item["row"],
+                    "status": "skipped",
+                    "skip_reason": "administrator_interview",
+                    "action": action_name,
+                    "lane": item.get("lane"),
+                    "finding": item.get("finding") or ADMIN_INTERVIEW_FINDING,
+                    "result": item.get("result") or ADMIN_INTERVIEW_RESULT,
+                    "evidence": [],
+                }
+            )
+            continue
         action = ACTIONS.get(action_name, action_adaptive_gui)
         try:
             runner.log(f"start row={item['row']} action={action_name} lane={item.get('lane')}")
@@ -1424,7 +1466,12 @@ def run_plan(plan_path: Path, out_dir: Path, only_row: int | None = None, debug:
             runner.log(f"done row={item['row']} evidence={evidence_paths}")
         except Exception as exc:
             runner.log(f"ERROR row={item.get('row')} action={action_name}: {type(exc).__name__}: {exc}")
-            status = "validation_failed" if isinstance(exc, EvidenceValidationError) else "error"
+            if isinstance(exc, UserConfirmationRequiredError):
+                status = "needs_user_confirmation"
+            elif isinstance(exc, EvidenceValidationError):
+                status = "validation_failed"
+            else:
+                status = "error"
             try:
                 error_name = f"row{int(item['row']):02d}_error_{action_name}.png"
                 error_path = runner.tmp_shot(error_name)

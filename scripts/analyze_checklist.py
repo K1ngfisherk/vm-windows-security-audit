@@ -45,6 +45,11 @@ KEYWORD_STOPWORDS = {
     "the", "and", "for", "with", "shall", "should", "check", "verify",
 }
 
+ADMIN_INTERVIEW_FINDING = "涉及访谈管理员，未进行操作"
+ADMIN_INTERVIEW_RESULT = "未检查"
+ADMIN_INTERVIEW_TERMS = ("访谈", "询问", "问询", "沟通", "线下确认")
+ADMIN_ROLE_TERMS = ("管理员", "管理人员", "系统管理员", "安全管理员", "it管理员", "it 管理员")
+
 
 def norm(value: Any) -> str:
     if value is None:
@@ -67,11 +72,24 @@ def find_header(sheet: Any) -> tuple[int, dict[str, int]]:
         mapping: dict[str, int] = {}
         score = 0
         for key, aliases in COLUMN_ALIASES.items():
+            used_columns = set(mapping.values())
+            matched_col = None
             for col, value in enumerate(values, start=1):
-                if value and any(alias == value or alias in value for alias in aliases):
-                    mapping[key] = col
-                    score += 1
+                if col in used_columns or not value:
+                    continue
+                if any(alias == value for alias in aliases):
+                    matched_col = col
                     break
+            if matched_col is None:
+                for col, value in enumerate(values, start=1):
+                    if col in used_columns or not value:
+                        continue
+                    if any(alias in value for alias in aliases):
+                        matched_col = col
+                        break
+            if matched_col is not None:
+                mapping[key] = matched_col
+                score += 1
         if score > best_score:
             best = (row, mapping)
             best_score = score
@@ -108,6 +126,11 @@ def infer_tool(text: str) -> str | None:
         if any(lower_text(hint) in text for hint in hints):
             return tool
     return None
+
+
+def is_admin_interview(data: dict[str, str]) -> bool:
+    combined = lower_text(" ".join(data.get(k, "") for k in ("category", "item", "expected", "operation", "remediation")))
+    return any(term in combined for term in ADMIN_INTERVIEW_TERMS) and any(term in combined for term in ADMIN_ROLE_TERMS)
 
 
 def extract_keywords(data: dict[str, str], pattern: dict[str, Any] | None) -> list[str]:
@@ -151,7 +174,7 @@ def evidence_names(row: int, pattern: dict[str, Any] | None, tool: str | None) -
     return [f"row{row:02d}_{tool_slug}_adaptive.png"]
 
 
-def plan_rows(workbook: Path, patterns_path: Path, task_label: str) -> dict[str, Any]:
+def plan_rows(workbook: Path, patterns_path: Path, task_label: str, include_screenshots: bool = False) -> dict[str, Any]:
     patterns = json.loads(patterns_path.read_text(encoding="utf-8"))
     wb = openpyxl.load_workbook(workbook, data_only=False)
     sheet = wb.active
@@ -171,42 +194,69 @@ def plan_rows(workbook: Path, patterns_path: Path, task_label: str) -> dict[str,
         if len(combined_lower) < 6:
             continue
 
-        scored = sorted(((score_pattern(combined_lower, p), p) for p in patterns), key=lambda pair: pair[0], reverse=True)
-        best_score, best_pattern = scored[0]
-        tool = infer_tool(combined_lower)
-
-        if best_score >= 2:
-            lane = "known"
-            confidence = "high" if best_score >= 3 else "medium"
-            pattern = best_pattern
-            tool = pattern.get("tool") or tool
-            action = pattern.get("gui_action")
-        elif tool:
-            lane = "inferred"
-            confidence = "medium"
+        admin_interview = is_admin_interview(data)
+        if admin_interview:
+            lane = "skipped"
+            confidence = "high"
             pattern = None
-            action = "adaptive_gui"
+            tool = None
+            action = "skip_admin_interview"
+            evidence = []
+            keywords = []
+            notes = "Administrator interview requires offline IT administrator communication; do not operate."
+            check_id = "admin_interview"
+            graphical_required = False
+            finding = ADMIN_INTERVIEW_FINDING
+            result = ADMIN_INTERVIEW_RESULT
         else:
-            lane = "adaptive"
-            confidence = "low"
-            pattern = None
-            action = "adaptive_gui"
+            scored = sorted(((score_pattern(combined_lower, p), p) for p in patterns), key=lambda pair: pair[0], reverse=True)
+            best_score, best_pattern = scored[0]
+            tool = infer_tool(combined_lower)
 
-        items.append(
-            {
-                "row": row,
-                "lane": lane,
-                "confidence": confidence,
-                "check_id": pattern["id"] if pattern else None,
-                "tool": tool,
-                "gui_action": action,
-                "graphical_required": True if not pattern else bool(pattern.get("graphical_required", True)),
-                "evidence": evidence_names(row, pattern, tool),
-                "keywords": extract_keywords(data, pattern),
-                "source": data,
-                "notes": pattern.get("notes") if pattern else "Use adaptive GUI rules; do not skip by default.",
-            }
-        )
+            if best_score >= 2:
+                lane = "known"
+                confidence = "high" if best_score >= 3 else "medium"
+                pattern = best_pattern
+                tool = pattern.get("tool") or tool
+                action = pattern.get("gui_action")
+            elif tool:
+                lane = "inferred"
+                confidence = "medium"
+                pattern = None
+                action = "adaptive_gui"
+            else:
+                lane = "adaptive"
+                confidence = "low"
+                pattern = None
+                action = "adaptive_gui"
+            evidence = evidence_names(row, pattern, tool) if include_screenshots else []
+            keywords = extract_keywords(data, pattern)
+            notes = pattern.get("notes") if pattern else "Use adaptive GUI rules; do not skip by default."
+            check_id = pattern["id"] if pattern else None
+            graphical_required = True if not pattern else bool(pattern.get("graphical_required", True))
+            finding = None
+            result = None
+
+        item = {
+            "row": row,
+            "lane": lane,
+            "confidence": confidence,
+            "check_id": check_id,
+            "tool": tool,
+            "gui_action": action,
+            "graphical_required": graphical_required,
+            "screenshots_requested": include_screenshots,
+            "evidence": evidence,
+            "keywords": keywords,
+            "source": data,
+            "notes": notes,
+        }
+        if finding is not None:
+            item["finding"] = finding
+        if result is not None:
+            item["result"] = result
+
+        items.append(item)
 
     return {
         "source_workbook": str(workbook),
@@ -220,6 +270,8 @@ def plan_rows(workbook: Path, patterns_path: Path, task_label: str) -> dict[str,
             "known": sum(1 for item in items if item["lane"] == "known"),
             "inferred": sum(1 for item in items if item["lane"] == "inferred"),
             "adaptive": sum(1 for item in items if item["lane"] == "adaptive"),
+            "skipped": sum(1 for item in items if item["lane"] == "skipped"),
+            "screenshots": include_screenshots,
         },
     }
 
@@ -230,12 +282,13 @@ def main() -> None:
     parser.add_argument("--patterns", required=True, type=Path)
     parser.add_argument("--task-label", required=True)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--screenshots", action="store_true", help="Include final screenshot filenames in the plan.")
     args = parser.parse_args()
 
     if args.out.parent.name.lower() != "tmp":
         raise SystemExit("Execution plan JSON must be written under an evidence tmp directory, for example <evidence>/tmp/plan.json")
 
-    plan = plan_rows(args.workbook, args.patterns, args.task_label)
+    plan = plan_rows(args.workbook, args.patterns, args.task_label, include_screenshots=args.screenshots)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(plan["summary"], ensure_ascii=False))
