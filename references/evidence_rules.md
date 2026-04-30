@@ -8,12 +8,13 @@
 
 ## Directory And Names
 
-- Final evidence directory: `Windows完整检查_<task_label>_证据`.
+- Final evidence directory: `<label>安全检查证据` by default.
+- Final workbook/report name: `<label>安全检查报告_<yyyyMMdd_HHmmss>.xlsx` by default.
 - Put final screenshots directly in that directory when screenshot mode is enabled.
-- Put all intermediate files under `Windows完整检查_<task_label>_证据/tmp`.
-- Put runtime JSON files such as `plan.json`, `runner_result.json`, and `image_validation.json` under `tmp`; never leave them in the evidence root.
-- If workbook output is requested, keep host `tmp` until `runner_result.json` has been merged into the copied workbook and the written `检查情况`/`结果` values have been validated; delete `tmp` only after that report check passes unless the user explicitly asks to keep diagnostics.
-- Do not use timestamped final folders or nested `最终截图证据` folders unless requested.
+- Put all intermediate files under `<label>安全检查证据/tmp`.
+- Put process files such as scripts, runtime JSON files (`plan.json`, `runner_result.json`, `image_validation.json`), logs, helper files, diagnostic screenshots, contact sheets, and preview files under `tmp`; never leave them in the evidence root.
+- If workbook output is requested, keep host `tmp` until `runner_result.json` has been merged into the copied workbook, the written `检查情况`/`结果` values have been validated, and the evidence directory has been checked; delete `tmp` only after both report and evidence checks pass unless the user explicitly asks to keep diagnostics.
+- Do not use timestamped evidence folders or nested `最终截图证据` folders unless requested or needed to avoid a naming collision.
 - The final evidence directory root should contain accepted final screenshots only when screenshot mode is enabled, not logs, stdout/stderr captures, runtime JSON files, JSON diagnostics, helper scripts, contact sheets, or preview files.
 - Screenshot filenames:
   - Lowercase ASCII.
@@ -64,8 +65,11 @@ Do not write a workbook unless requested.
 When writing a workbook:
 
 - Copy the source workbook first.
+- If the user does not specify an output name, use `<label>安全检查报告_<yyyyMMdd_HHmmss>.xlsx`.
 - Preserve original formatting as much as possible.
 - Detect the `检查情况` and `结果` columns instead of assuming fixed letters.
+- Only write to `检查情况` and `结果` by default.
+- Do not modify `整改建议`: leave its value, style, width, visibility, comments, hyperlinks, and formatting exactly as in the source workbook. It may be read as context but is not an output column.
 - Do not add hyperlinks by default.
 - Do not write absolute evidence paths into cells.
 
@@ -75,7 +79,7 @@ When the user requests embedded evidence:
 - Keep a concise result sentence above the images.
 - Remove filename/link wording such as `截图:`, `证据:`, `rowNN_...png`.
 - Place multiple images side by side when practical.
-- Adjust only the affected rows/columns needed for readability.
+- Adjust only the affected rows/columns needed for readability, and never adjust `整改建议`.
 - Prefer Excel COM placement on Windows hosts with Excel installed, because it
   preserves the workbook's existing layout more reliably than generic `.xlsx`
   libraries for floating images.

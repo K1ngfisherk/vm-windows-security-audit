@@ -24,7 +24,9 @@
 - 需要截图时按检查表行号保存截图证据，例如 `row11_gpedit_rdp_client_connection_encryption_level.png`。
 - 对截图进行基础有效性和页面内容检查，减少截图页面与检查项不匹配的问题。
 - 支持离线准备虚拟机中的 Python 和 GUI 自动化依赖。
-- 可选生成 Excel 报告，把截图嵌入到检查结果列。
+- Windows GUI 取证会使用当前客户机用户目录下的受控工作目录，例如 `C:\Users\<用户名>\CodexVmAudit`。走离线包时无论客户机是否已有 Python，都把离线 Python 安装到这个目录下，并通过 manifest 使用绝对 `python.exe` 路径，不依赖 PATH。
+- 安全检查成功后默认清理客户机内的 venv、托管 Python、离线包、脚本和临时文件；客户机原有 Python 不会被卸载。排障时可保留临时环境。
+- 可选生成 Excel 报告；默认只允许写 `检查情况` 和 `结果` 两列，`整改建议` 列必须保持原值和原格式不变。
 - 识别到 Linux/Unix 检测时，先向客户确认 SSH IP、账户和密码/密钥，默认用 SSH 输出命令文本与 `manifest.json`；客户明确说没有 SSH 或提供不了连接信息时，再用 VMware Tools/`vmrun` 直接执行命令；仅在用户要求截图/证据时使用 Windows Terminal + OpenSSH 生成每条命令的截图。
 - Linux/Unix SSH 取证也可输出复制版 Excel；命令可通过 `row`/`workbookRow` 或 `row05` 这类标记映射回检查表行。
 - 最终交付前会把截图重命名为中文检查项名称，例如 `row05_应对登录操作系统和数据库系统的用户进行身份标识和鉴别.png`。
@@ -47,6 +49,7 @@
 - VMware Tools 正常运行。
 - 已登录到桌面。
 - 提供用于检查的 guest 用户名和密码。
+- Windows Server 截图取证必须提供真实已登录桌面的 Windows 账号，并在调用编排脚本时显式传入 `-InteractiveGuestUser`；未提供时应先询问用户，不能回退到 Guest/访客账户。
 
 ## 工作流程
 
@@ -71,17 +74,17 @@ Linux/Unix SSH 检查：
 
 ## 输出内容
 
-默认输出在源检查表同级目录，文件名会包含任务标签。
+默认输出在源检查表同级目录，证据目录不加时间戳，报告文件名加时间戳。
 
 ```text
-Windows完整检查_<task_label>_证据\
-<source_workbook_stem>_<task_label>.xlsx
+<label>安全检查证据\
+<label>安全检查报告_<yyyyMMdd_HHmmss>.xlsx
 ```
 
 Linux/Unix SSH 证据输出目录：
 
 ```text
-<OutputRoot>\<HostName>_<timestamp>\
+<OutputRoot>\<label>安全检查证据\
 ```
 
 证据截图命名格式：
@@ -90,8 +93,8 @@ Linux/Unix SSH 证据输出目录：
 rowNN_<检查项中文>.png
 ```
 
-最终证据目录中主要包含可用于交付的截图文件；无截图模式则输出逐条命令文本和 `manifest.json`。报告文件只在用户要求生成时创建。
-如果 Linux/Unix 检查需要 Excel，输出为原检查表的复制版。`检查情况` 只写命令关键结果和简要描述，不写“已通过 SSH”“检查方式”“证据文件”等过程性文字；`结果` 从原表固定选项中选择，通常为 `符合`、`不符合`、`不适用`、`未检查`。
+最终证据目录中主要包含可用于交付的截图文件；无截图模式则输出逐条命令文本和 `manifest.json`。过程脚本、JSON、日志、诊断图等可临时放在证据目录的 `tmp` 下，必须等报告和证据都检查完成后再删除。报告文件只在用户要求生成时创建。
+如果 Linux/Unix 检查需要 Excel，输出为原检查表的复制版。`检查情况` 只写命令关键结果和简要描述，不写“已通过 SSH”“检查方式”“证据文件”等过程性文字；`结果` 从原表固定选项中选择，通常为 `符合`、`不符合`、`不适用`、`未检查`。`整改建议` 只读，不能写入、清空或改样式。
 
 ## 当前覆盖范围
 

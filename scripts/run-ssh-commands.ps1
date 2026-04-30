@@ -129,7 +129,7 @@ $label = ConvertTo-SafeFilePart $TaskLabel
 if ([string]::IsNullOrWhiteSpace($label)) {
   $label = ConvertTo-SafeFilePart $HostName
 }
-$outputDir = Join-Path $OutputRoot (('{0}_{1}' -f $label, $timestamp))
+$outputDir = Join-Path $OutputRoot ('{0}安全检查证据' -f $label)
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 $manifest = [System.Collections.Generic.List[object]]::new()
 

@@ -24,7 +24,9 @@
 - When screenshots are requested, save row-level evidence with stable names such as `row11_gpedit_rdp_client_connection_encryption_level.png`.
 - Perform basic screenshot usability and page-content checks to reduce mismatched evidence.
 - Support offline preparation of Python and GUI automation dependencies inside the VM.
-- Optionally generate an Excel report with screenshots embedded into the result column.
+- Windows GUI evidence uses a managed work directory under the current guest user's profile, for example `C:\Users\<username>\CodexVmAudit`. When the offline bundle is used, the bundled offline Python is installed there regardless of whether the guest already has Python, and the runner uses the manifest's absolute `python.exe` path instead of PATH.
+- After successful checks, the guest-side venv, managed Python, offline bundle, scripts, and temp files are cleaned by default. Existing customer Python installations are not uninstalled.
+- Optionally generate an Excel report. By default, only `检查情况` and `结果` are writable; `整改建议` must keep its original value and formatting.
 - When Linux/Unix checks are detected, ask the customer for SSH IP, account, and password/key first. Default to SSH command text output plus `manifest.json`; if the customer says SSH is unavailable or cannot provide connection details, use VMware Tools/`vmrun` direct commands. Use Windows Terminal + OpenSSH screenshots only when screenshots/evidence are requested.
 - Linux/Unix SSH evidence can also produce a copied Excel workbook; commands map back to checklist rows through `row`/`workbookRow` or markers such as `row05`.
 - Before delivery, screenshots are renamed to Chinese checklist-item filenames, for example `row05_应对登录操作系统和数据库系统的用户进行身份标识和鉴别.png`.
@@ -47,6 +49,7 @@ Guest requirements:
 - VMware Tools running.
 - Logged-in desktop session.
 - Guest username and password for the audit.
+- Windows Server screenshot evidence requires the actual logged-in desktop account, passed explicitly as `-InteractiveGuestUser`; if it was not provided, ask the user for it instead of falling back to Guest.
 
 ## Workflow
 
@@ -71,17 +74,17 @@ Linux/Unix SSH checks:
 
 ## Outputs
 
-By default, outputs are written next to the source workbook and include the task label in their names.
+By default, outputs are written next to the source workbook. The evidence directory is not timestamped; report filenames are timestamped.
 
 ```text
-Windows完整检查_<task_label>_证据\
-<source_workbook_stem>_<task_label>.xlsx
+<label>安全检查证据\
+<label>安全检查报告_<yyyyMMdd_HHmmss>.xlsx
 ```
 
 Linux/Unix SSH evidence output directory:
 
 ```text
-<OutputRoot>\<HostName>_<timestamp>\
+<OutputRoot>\<label>安全检查证据\
 ```
 
 Screenshot naming format:
@@ -90,8 +93,8 @@ Screenshot naming format:
 rowNN_<Chinese checklist item>.png
 ```
 
-The final evidence directory mainly contains deliverable screenshot files; no-screenshot mode outputs per-command text files and `manifest.json`. Report workbooks are created only when requested.
-When Linux/Unix checks need Excel output, the workbook is a copy of the source checklist. `检查情况` contains only concise key command results, not process wording such as `已通过 SSH`, `检查方式`, or `证据文件`; `结果` is selected from the workbook's fixed choices, usually `符合`, `不符合`, `不适用`, and `未检查`.
+The final evidence directory mainly contains deliverable screenshot files; no-screenshot mode outputs per-command text files and `manifest.json`. Process scripts, JSON files, logs, diagnostic images, and helper files may temporarily live under the evidence directory's `tmp` folder, and that folder is deleted only after both the report and evidence outputs have passed final checks. Report workbooks are created only when requested.
+When Linux/Unix checks need Excel output, the workbook is a copy of the source checklist. `检查情况` contains only concise key command results, not process wording such as `已通过 SSH`, `检查方式`, or `证据文件`; `结果` is selected from the workbook's fixed choices, usually `符合`, `不符合`, `不适用`, and `未检查`. `整改建议` is read-only and must not be written, cleared, or restyled.
 
 ## Current Coverage
 

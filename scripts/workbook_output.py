@@ -2,7 +2,7 @@
 """Write checklist results into a copied workbook.
 
 Modes:
-- text: write finding/status and plain evidence filenames.
+- text: write finding/status only.
 - embed-images: write finding/status and insert images in the finding column.
 
 The input plan may be enriched after execution with `finding`, `status`, and
@@ -41,6 +41,8 @@ STATUS_RESULT_ALIASES = {
     "未执行",
     "未操作",
 }
+PROCESS_PREFIX_RE = re.compile(r"^\s*(已检查|已通过|通过|使用|执行|检查方式|检查命令|命令输出)[^：:]{0,40}[：:]\s*")
+RAW_FIELD_RE = re.compile(r"\b(?:audit|registry|reg|HKLM|HKCU|HKEY_|DWORD|REG_\w+|xxx)\s*=", re.I)
 
 
 def col_letter(index: int) -> str:
@@ -49,6 +51,20 @@ def col_letter(index: int) -> str:
 
 def write_text(cell: Any, text: str) -> None:
     cell.value = text.strip() if text else ""
+
+
+def assert_workbook_path_writable(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        with path.open("r+b"):
+            pass
+    except PermissionError as exc:
+        raise SystemExit(
+            f"Output workbook is locked or open in Excel; refusing to write and claim success: {path}"
+        ) from exc
+    except OSError as exc:
+        raise SystemExit(f"Output workbook is not writable: {path}: {exc}") from exc
 
 
 def strip_evidence_text(value: Any) -> str:
@@ -61,7 +77,25 @@ def strip_evidence_text(value: Any) -> str:
     return text.strip()
 
 
-def normalize_result(value: str, options: list[str]) -> str:
+def sanitize_delivery_finding(value: Any, *, row: int) -> str:
+    text = strip_evidence_text(value)
+    text = PROCESS_PREFIX_RE.sub("", text).strip()
+    if re.search(r"\brow\d{2}_.+\.png\b", text, flags=re.I):
+        raise SystemExit(f"row {row} finding still contains screenshot filename text")
+    if re.search(r"[A-Za-z]:\\|\\\\[^\\]+\\", text):
+        raise SystemExit(f"row {row} finding contains a filesystem/evidence path")
+    if RAW_FIELD_RE.search(text):
+        raise SystemExit(f"row {row} finding contains raw machine field syntax; write a delivery conclusion instead")
+    return text
+
+
+def unchecked_result(options: list[str]) -> str:
+    if "未检查" in options:
+        return "未检查"
+    return ""
+
+
+def normalize_result(value: str, options: list[str], *, strict: bool = False, label: str = "result") -> str:
     text = value.strip()
     if not options or not text:
         return text
@@ -84,10 +118,13 @@ def normalize_result(value: str, options: list[str]) -> str:
     mapped = mapping.get(text.lower(), mapping.get(text))
     if mapped and mapped in options:
         return mapped
-    for option in options:
-        if option in text or text in option:
-            return option
-    return "符合" if "符合" in options else options[0]
+    if not strict:
+        for option in options:
+            if option in text or text in option:
+                return option
+    if strict:
+        raise SystemExit(f"{label} {value!r} is not one of the workbook result options: {', '.join(options)}")
+    return unchecked_result(options)
 
 
 def report_result(item: dict[str, Any], options: list[str] | None = None) -> str:
@@ -96,7 +133,7 @@ def report_result(item: dict[str, Any], options: list[str] | None = None) -> str
         return normalize_result(ADMIN_INTERVIEW_RESULT, options)
     for key in ("result", "compliance", "judgement", "judgment"):
         if item.get(key):
-            return normalize_result(str(item[key]), options)
+            return normalize_result(str(item[key]), options, strict=True, label=f"{key} for row {item.get('row')}")
     status = str(item.get("status") or "")
     if status and (status in options or status in STATUS_RESULT_ALIASES):
         return normalize_result(status, options)
@@ -136,6 +173,8 @@ def validate_written_workbook(ws: Any, plan: dict[str, Any], finding_col: int, r
         expected_finding = item.get("finding") or item.get("observed") or ""
         if is_admin_interview_skip(item):
             expected_finding = ADMIN_INTERVIEW_FINDING
+        if expected_finding:
+            expected_finding = sanitize_delivery_finding(expected_finding, row=row)
         expected_result = report_result(item, result_options)
         actual_finding = strip_evidence_text(ws.cell(row, finding_col).value)
         actual_result = str(ws.cell(row, result_col).value or "").strip()
@@ -145,6 +184,57 @@ def validate_written_workbook(ws: Any, plan: dict[str, Any], finding_col: int, r
             errors.append(f"row {row} result mismatch: expected {expected_result!r}, got {actual_result!r}")
     if errors:
         raise SystemExit("Workbook validation failed after write: " + "; ".join(errors[:8]))
+
+
+def validate_remediation_unchanged(source_path: Path, output_path: Path, plan: dict[str, Any]) -> None:
+    remediation_col = plan.get("columns", {}).get("remediation")
+    if not remediation_col:
+        return
+    remediation_col = int(remediation_col)
+    source_wb = openpyxl.load_workbook(source_path, data_only=False)
+    output_wb = openpyxl.load_workbook(output_path, data_only=False)
+    try:
+        source_ws = source_wb[plan["sheet"]]
+        output_ws = output_wb[plan["sheet"]]
+        col_letter_name = col_letter(remediation_col)
+        source_dim = source_ws.column_dimensions[col_letter_name]
+        output_dim = output_ws.column_dimensions[col_letter_name]
+        errors: list[str] = []
+        if source_dim.width != output_dim.width or source_dim.hidden != output_dim.hidden:
+            errors.append("整改建议 column dimension changed")
+        for item in plan.get("items", []):
+            row = int(item["row"])
+            source_cell = source_ws.cell(row, remediation_col)
+            output_cell = output_ws.cell(row, remediation_col)
+            if source_cell.value != output_cell.value:
+                errors.append(f"row {row} 整改建议 value changed")
+            if source_cell.style_id != output_cell.style_id:
+                errors.append(f"row {row} 整改建议 style changed")
+            if source_cell.number_format != output_cell.number_format:
+                errors.append(f"row {row} 整改建议 number format changed")
+            source_link = source_cell.hyperlink.target if source_cell.hyperlink else None
+            output_link = output_cell.hyperlink.target if output_cell.hyperlink else None
+            if source_link != output_link:
+                errors.append(f"row {row} 整改建议 hyperlink changed")
+            source_comment = source_cell.comment.text if source_cell.comment else None
+            output_comment = output_cell.comment.text if output_cell.comment else None
+            if source_comment != output_comment:
+                errors.append(f"row {row} 整改建议 comment changed")
+        if errors:
+            raise SystemExit("Workbook validation failed after write: " + "; ".join(errors[:8]))
+    finally:
+        source_wb.close()
+        output_wb.close()
+
+
+def validate_saved_workbook(source_path: Path, path: Path, plan: dict[str, Any], finding_col: int, result_col: int, result_options: list[str]) -> None:
+    wb = openpyxl.load_workbook(path, data_only=False)
+    try:
+        ws = wb[plan["sheet"]]
+        validate_written_workbook(ws, plan, finding_col, result_col, result_options)
+    finally:
+        wb.close()
+    validate_remediation_unchanged(source_path, path, plan)
 
 
 def cleanup_tmp_after_report(plan_path: Path, evidence_dir: Path) -> None:
@@ -157,6 +247,21 @@ def cleanup_tmp_after_report(plan_path: Path, evidence_dir: Path) -> None:
     except ValueError as exc:
         raise SystemExit(f"Refusing to clean tmp outside evidence dir: {tmp_dir}") from exc
     shutil.rmtree(tmp_dir)
+
+
+def validate_evidence_directory(plan: dict[str, Any], evidence_dir: Path) -> None:
+    evidence_root = evidence_dir.resolve()
+    if not evidence_root.exists():
+        raise SystemExit(f"Evidence directory does not exist: {evidence_root}")
+    missing: list[str] = []
+    for item in plan.get("items", []):
+        if is_admin_interview_skip(item):
+            continue
+        for name in item.get("evidence") or []:
+            if not (evidence_root / str(name)).exists():
+                missing.append(str(name))
+    if missing:
+        raise SystemExit("Evidence validation failed before tmp cleanup; missing files: " + "; ".join(missing[:8]))
 
 
 def fit_image(img: Image, max_width: int, max_height: int) -> Image:
@@ -174,9 +279,11 @@ def main() -> None:
     parser.add_argument("--output-workbook", required=True, type=Path)
     parser.add_argument("--mode", choices=["text", "embed-images"], default="text")
     parser.add_argument("--runner-result", type=Path, help="Optional runner_result.json to merge into the plan before writing.")
-    parser.add_argument("--cleanup-tmp", action="store_true", help="Remove evidence/tmp after workbook validation succeeds.")
+    parser.add_argument("--cleanup-tmp", action="store_true", help="Remove evidence/tmp after workbook and evidence validation succeed.")
+    parser.add_argument("--include-evidence-filenames", action="store_true", help="In text mode, append screenshot filenames to the finding cell when the user explicitly requests that wording.")
     args = parser.parse_args()
 
+    assert_workbook_path_writable(args.output_workbook)
     if args.source_workbook.resolve() != args.output_workbook.resolve():
         args.output_workbook.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(args.source_workbook, args.output_workbook)
@@ -196,11 +303,12 @@ def main() -> None:
         finding = item.get("finding") or item.get("observed") or strip_evidence_text(ws.cell(row, finding_col).value)
         if is_admin_interview_skip(item):
             finding = ADMIN_INTERVIEW_FINDING
+        finding = sanitize_delivery_finding(finding, row=row)
         status = report_result(item, result_options)
         evidence = [] if is_admin_interview_skip(item) else item.get("evidence") or []
 
         if args.mode == "text":
-            evidence_text = "\n".join(f"截图：{name}" for name in evidence)
+            evidence_text = "\n".join(f"截图：{name}" for name in evidence) if args.include_evidence_filenames else ""
             write_text(ws.cell(row, finding_col), "\n".join(part for part in [finding, evidence_text] if part))
             if status:
                 write_text(ws.cell(row, result_col), status)
@@ -225,9 +333,17 @@ def main() -> None:
             if index > 0:
                 break
 
-    wb.save(args.output_workbook)
-    validate_written_workbook(ws, plan, finding_col, result_col, result_options)
+    try:
+        wb.save(args.output_workbook)
+    except PermissionError as exc:
+        raise SystemExit(
+            f"Output workbook is locked or open in Excel; write failed and no success is claimed: {args.output_workbook}"
+        ) from exc
+    finally:
+        wb.close()
+    validate_saved_workbook(args.source_workbook, args.output_workbook, plan, finding_col, result_col, result_options)
     if args.cleanup_tmp:
+        validate_evidence_directory(plan, args.evidence_dir)
         cleanup_tmp_after_report(args.plan, args.evidence_dir)
     print(json.dumps({"output_workbook": str(args.output_workbook), "mode": args.mode, "tmp_removed": bool(args.cleanup_tmp)}, ensure_ascii=False))
 

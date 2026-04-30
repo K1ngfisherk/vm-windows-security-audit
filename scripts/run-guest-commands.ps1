@@ -116,7 +116,7 @@ $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $vmName = ConvertTo-SafeFilePart ([System.IO.Path]::GetFileNameWithoutExtension($Vmx))
 $label = ConvertTo-SafeFilePart $TaskLabel
 if ([string]::IsNullOrWhiteSpace($label)) { $label = $vmName }
-$outputDir = Join-Path $OutputRoot (('{0}_{1}' -f $label, $timestamp))
+$outputDir = Join-Path $OutputRoot ('{0}安全检查证据' -f $label)
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 $hostTmp = Join-Path $outputDir 'tmp'
 New-Item -ItemType Directory -Force -Path $hostTmp | Out-Null

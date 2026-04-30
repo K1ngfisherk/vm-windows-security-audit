@@ -16,13 +16,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sshScript = Join-Path $scriptDir 'run-ssh-commands.ps1'
 $vmrunScript = Join-Path $scriptDir 'run-guest-commands.ps1'
 
 function Invoke-Script {
   param([string]$Path, [object[]]$ScriptArgs)
-  $output = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $Path @ScriptArgs 2>&1 | ForEach-Object { [string]$_ })
+  $output = @(& powershell -NoProfile -OutputFormat Text -ExecutionPolicy Bypass -File $Path @ScriptArgs 2>&1 | ForEach-Object { [string]$_ })
   $code = $LASTEXITCODE
   if ($code -ne 0) {
     throw "Script failed ($code): $Path`n$($output -join [Environment]::NewLine)"
@@ -59,14 +62,31 @@ $vmrunArgs = @(
 )
 
 if ($ValidateOnly) {
+  $validatedAny = $false
   if (-not [string]::IsNullOrWhiteSpace($HostName)) {
     Invoke-Script -Path $sshScript -ScriptArgs ($sshArgs + @('-ValidateOnly'))
-  }
-  if ($AllowVmrunFallback -and -not [string]::IsNullOrWhiteSpace($Vmrun) -and -not [string]::IsNullOrWhiteSpace($Vmx)) {
-    Invoke-Script -Path $vmrunScript -ScriptArgs ($vmrunArgs + @('-ValidateOnly'))
+    $validatedAny = $true
   }
   if ([string]::IsNullOrWhiteSpace($HostName) -and -not $AllowVmrunFallback) {
     throw "Linux SSH connection info is required first: HostName/IP, User, and Password or KeyFile. Use vmrun fallback only after the user says SSH is unavailable or cannot be provided."
+  }
+  if ($AllowVmrunFallback) {
+    if (
+      [string]::IsNullOrWhiteSpace($Vmrun) -or
+      [string]::IsNullOrWhiteSpace($Vmx) -or
+      [string]::IsNullOrWhiteSpace($guestUserToUse) -or
+      [string]::IsNullOrWhiteSpace($guestPasswordToUse)
+    ) {
+      if (-not $validatedAny) {
+        throw "Linux SSH connection info was not provided, and vmrun fallback inputs are incomplete."
+      }
+    } else {
+      Invoke-Script -Path $vmrunScript -ScriptArgs ($vmrunArgs + @('-ValidateOnly'))
+      $validatedAny = $true
+    }
+  }
+  if (-not $validatedAny) {
+    throw "No runnable Linux command path could be validated. Provide SSH HostName/IP plus account credentials, or complete vmrun fallback inputs after the user says SSH is unavailable."
   }
   exit 0
 }

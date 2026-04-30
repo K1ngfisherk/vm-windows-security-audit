@@ -216,7 +216,13 @@ def result_options_for_sheet(sheet: Any, result_col: int | None) -> list[str]:
     return options or list(DEFAULT_RESULT_OPTIONS)
 
 
-def normalize_result(value: str, options: list[str]) -> str:
+def unchecked_result(options: list[str]) -> str:
+    if "未检查" in options:
+        return "未检查"
+    return ""
+
+
+def normalize_result(value: str, options: list[str], *, strict: bool = False, label: str = "result") -> str:
     text = norm(value)
     if not options:
         return text
@@ -239,10 +245,13 @@ def normalize_result(value: str, options: list[str]) -> str:
     mapped = mapping.get(text.lower(), mapping.get(text))
     if mapped and mapped in options:
         return mapped
-    for option in options:
-        if option in text or text in option:
-            return option
-    return "符合" if "符合" in options else options[0]
+    if not strict:
+        for option in options:
+            if option in text or text in option:
+                return option
+    if strict:
+        raise SystemExit(f"{label} {value!r} is not one of the workbook result options: {', '.join(options)}")
+    return unchecked_result(options)
 
 
 def after_marker_lines(text: str, marker: str) -> list[str]:
@@ -297,7 +306,10 @@ def summarize_linux_output(row: int, output_text: str, options: list[str]) -> tu
     if row == 5:
         statuses = re.findall(r"^([^:\s]+):(EMPTY|LOCKED|SET)$", text, flags=re.M)
         set_users = [user for user, state in statuses if state == "SET"]
-        empty_users = after_marker_lines(text, "--- empty password accounts ---")
+        empty_users = [user for user, state in statuses if state == "EMPTY"]
+        for user in after_marker_lines(text, "--- empty password accounts ---"):
+            if user not in empty_users:
+                empty_users.append(user)
         result = "不符合" if empty_users else "符合"
         set_text = "、".join(set_users[:6]) if set_users else "未发现"
         empty_text = "、".join(empty_users) if empty_users else "空"
@@ -449,7 +461,16 @@ def build_plan(
             )
         else:
             finding = summary_finding
-        result = normalize_result(str(command.get("result") or result_text or inferred_result), result_options)
+        explicit_result = command.get("result") or result_text
+        if explicit_result:
+            result = normalize_result(
+                str(explicit_result),
+                result_options,
+                strict=True,
+                label=f"result for command {command_id!r}",
+            )
+        else:
+            result = normalize_result(str(inferred_result), result_options)
         evidence = [evidence_name(index, command, manifest)] if include_screenshots else []
 
         items.append(

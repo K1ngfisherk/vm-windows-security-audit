@@ -6,8 +6,8 @@
   "files": [
     {
       "path": "install_guest_offline.ps1",
-      "size": 851,
-      "sha256": "AA9FFB49D7CA663FD531DA4F83C75ACB9CA4EB5075A165ACA9E60189638A2726"
+      "size": 1284,
+      "sha256": "8CB29D4584F9F4A4B90D37334D21889EACDEB08EA50EF97E20108A517D1B69E1"
     },
     {
       "path": "python-3.9.13-amd64.exe",

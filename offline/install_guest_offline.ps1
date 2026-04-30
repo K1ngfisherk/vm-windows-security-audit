@@ -1,10 +1,17 @@
 param(
   [string]$PythonInstaller = "",
   [string]$Wheelhouse = "",
-  [string]$Requirements = ""
+  [string]$Requirements = "",
+  [string]$EnvRoot = "",
+  [string]$InstallDir = "",
+  [string]$Manifest = "",
+  [switch]$Cleanup
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 $offlineDir = $PSScriptRoot
 $repoRoot = Split-Path -Parent $offlineDir
@@ -24,8 +31,15 @@ if (-not $Requirements) {
   $Requirements = Join-Path $offlineDir "requirements-guest-py39.txt"
 }
 
-& $setup `
-  -PythonInstaller $PythonInstaller `
-  -Wheelhouse $Wheelhouse `
-  -Requirements $Requirements `
-  -NoWinget
+$args = @(
+  "-PythonInstaller", $PythonInstaller,
+  "-Wheelhouse", $Wheelhouse,
+  "-Requirements", $Requirements,
+  "-NoWinget"
+)
+if (-not [string]::IsNullOrWhiteSpace($EnvRoot)) { $args += @("-EnvRoot", $EnvRoot) }
+if (-not [string]::IsNullOrWhiteSpace($InstallDir)) { $args += @("-InstallDir", $InstallDir) }
+if (-not [string]::IsNullOrWhiteSpace($Manifest)) { $args += @("-Manifest", $Manifest) }
+if ($Cleanup) { $args += "-Cleanup" }
+
+& $setup @args

@@ -4,6 +4,7 @@
   [string]$Password,
   [Parameter(Mandatory=$true)][string]$CommandsJson,
   [string]$OutputRoot = (Join-Path (Get-Location) 'ssh-evidence'),
+  [string]$TaskLabel = "",
   [int]$DefaultWaitSeconds = 2,
   [int]$LoginWaitSeconds = 3,
   [int]$TerminalCols = 180,
@@ -22,6 +23,11 @@ function Assert-CommandExists([string]$Name) {
 function ConvertTo-SafeFilePart([string]$Text) {
   if ([string]::IsNullOrWhiteSpace($Text)) { return 'command' }
   return (($Text -replace '[\\/:*?"<>|\s]+','_') -replace '[^A-Za-z0-9_.-]','_').Trim('_')
+}
+
+function ConvertTo-SafeFolderLabel([string]$Text) {
+  if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+  return (($Text -replace '[\\/:*?"<>|]+','_') -replace '\s+','_').Trim(' ._')
 }
 
 function Load-CommandList([string]$Path) {
@@ -104,7 +110,11 @@ if ($ValidateOnly) {
 }
 
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-$outputDir = Join-Path $OutputRoot (('{0}_{1}' -f (ConvertTo-SafeFilePart $HostName), $timestamp))
+$label = ConvertTo-SafeFolderLabel $TaskLabel
+if ([string]::IsNullOrWhiteSpace($label)) {
+  $label = ConvertTo-SafeFolderLabel $HostName
+}
+$outputDir = Join-Path $OutputRoot ('{0}安全检查证据' -f $label)
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 
 $title = 'ssh_evidence_' + (ConvertTo-SafeFilePart $HostName) + '_' + $timestamp
