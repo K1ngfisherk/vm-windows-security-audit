@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rename final evidence screenshots to Chinese checklist-item names."""
+"""Rename final evidence screenshots to concise checklist evidence names."""
 
 from __future__ import annotations
 
@@ -23,13 +23,38 @@ def safe_name(text: str, fallback: str, max_len: int = 80) -> str:
     return (value or fallback)[:max_len].rstrip("._ ")
 
 
+SHORT_LABEL_BY_CHECK_ID = {
+    "row05": "身份鉴别",
+    "row06": "口令策略",
+    "row10": "失败锁定",
+    "row11": "远程管理",
+    "row12": "用户唯一性",
+    "row14": "文件权限",
+    "row17": "默认账户",
+    "row18": "多余账户",
+    "row19": "审计服务",
+    "row20": "审计事件",
+    "row21": "审计记录",
+    "row22": "服务端口",
+    "row23": "登录限制",
+    "row24": "超时锁定",
+}
+
+
 def base_label(item: dict[str, Any]) -> str:
-    source = item.get("source") or {}
-    for key in ("item", "expected", "operation", "category"):
-        value = safe_name(source.get(key), "")
+    for key in ("evidence_label", "evidenceLabel", "short_label", "shortName"):
+        value = safe_name(item.get(key), "", max_len=32)
         if value:
             return value
-    return safe_name(item.get("check_id") or item.get("gui_action") or "截图", "截图")
+    check_id = safe_name(item.get("check_id"), "", max_len=32)
+    if check_id in SHORT_LABEL_BY_CHECK_ID:
+        return SHORT_LABEL_BY_CHECK_ID[check_id]
+    source = item.get("source") or {}
+    for key in ("item", "expected", "operation", "category"):
+        value = safe_name(source.get(key), "", max_len=32)
+        if value:
+            return value
+    return safe_name(item.get("check_id") or item.get("gui_action") or "截图", "截图", max_len=32)
 
 
 def unique_path(path: Path) -> Path:
@@ -61,7 +86,7 @@ def rename_evidence(plan: dict[str, Any], evidence_dir: Path) -> dict[str, Any]:
                 continue
             suffix = "" if index == 0 else f"_补充{index}"
             new_name = f"row{row:02d}_{label}{suffix}{old_path.suffix.lower()}"
-            new_name = safe_name(new_name, f"row{row:02d}_截图{suffix}{old_path.suffix.lower()}", max_len=120)
+            new_name = safe_name(new_name, f"row{row:02d}_截图{suffix}{old_path.suffix.lower()}", max_len=64)
             if not new_name.lower().endswith(old_path.suffix.lower()):
                 new_name = f"{new_name}{old_path.suffix.lower()}"
             new_path = unique_path(evidence_dir / new_name)

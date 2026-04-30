@@ -129,17 +129,17 @@ Use this workflow for Linux/Unix checks. Ask for SSH IP and account credentials 
 
 Do not use this workflow for Excel/report editing alone. Keep it limited to command execution and optional screenshot evidence collection; use the spreadsheet/report workflow after command output or screenshot evidence is collected.
 
-1. Create or identify a JSON command list. Use `scripts/sample-commands.json` as the format reference. If workbook output is needed, each command must map to a checklist row through an explicit `row`/`workbookRow` field or an id/name/command marker such as `row05`.
+1. Create or identify a JSON command list. Use `scripts/linux-baseline-commands.json` for the bundled Linux checklist and `scripts/sample-commands.json` as the minimal schema reference. If workbook output is needed, each command must map to a checklist row through an explicit `row`/`workbookRow` field or an id/name/command marker such as `row05`.
 2. Default fast path: run `scripts/run-linux-commands.ps1` with SSH host/IP and account credentials. The output is per-command text files plus `manifest.json`, with no screenshots.
 3. If the user says SSH is unavailable or cannot be provided, rerun `scripts/run-linux-commands.ps1` with `-AllowVmrunFallback` plus VMX/guest credentials, or run `scripts/run-guest-commands.ps1` directly.
-4. Screenshot path only when requested: run `scripts/capture-ssh-evidence.ps1` from Windows PowerShell. This remains SSH-first because it preserves the upstream Windows Terminal screenshot workflow.
+4. Screenshot path only when requested: run `scripts/capture-ssh-evidence.ps1` from Windows PowerShell. This remains SSH-first because it preserves the upstream Windows Terminal screenshot workflow. When a command can produce long output, keep `command` as the complete raw collection command and add `screenshotCommand` or `focusCommand` that prints only the row's key fields for the screenshot.
 5. If screenshot mode is on, verify the output folder contains per-command screenshots such as `01_rowXX.png`/`01_cmdXX.png` and `manifest.json`.
-6. If Excel output is requested, run `scripts/ssh_workbook_plan.py` to convert the command list and optional `manifest.json` into the same plan format used by the Windows workflow. Pass `--screenshots` only when screenshots were collected; the text workbook writer still keeps images out of `检查情况` unless an embedded-image report was explicitly requested.
+6. If Excel output is requested, run `scripts/ssh_workbook_plan.py` to convert the command list and optional `manifest.json` into the same plan format used by the Windows workflow. Pass `--manifest-json` from the raw SSH command collection so summaries are based on complete text output. If screenshots were collected separately, also pass `--screenshot-manifest-json` and `--screenshots`; the text workbook writer still keeps images out of `检查情况` unless an embedded-image report was explicitly requested.
    - For Linux workbook cells, `检查情况` should be a concise key-result summary, for example `PASS_MAX_DAYS=99999、PASS_MIN_LEN=5；未发现 TMOUT 设置。`
    - Do not include `已通过 SSH...`, `检查方式`, `证据文件`, or evidence filenames in `检查情况` unless the user explicitly asks for that wording.
    - `结果` must be one of the workbook's fixed dropdown choices. Prefer `符合` when the command output meets the expected result, `不符合` when required configuration is missing or weaker than expected, `不适用` only when the row truly does not apply, and `未检查` only for skipped/unoperated rows.
    - Do not write to `整改建议` for Linux/Unix reports.
-7. Before delivering screenshot evidence or writing a screenshot report, run `scripts/finalize_evidence_names.py` to rename final screenshots from operational names to Chinese checklist-item names such as `row05_应对登录操作系统和数据库系统的用户进行身份标识和鉴别.png`. Call `scripts/workbook_output.py --mode text` for text-only reports, or `scripts/workbook_embed_excel_com.ps1` / `scripts/workbook_output.py --mode embed-images` only when the user requested screenshots inside the report.
+7. Before delivering screenshot evidence or writing a screenshot report, run `scripts/finalize_evidence_names.py` to rename final screenshots from operational names to concise names such as `row05_身份鉴别.png` or `row06_口令策略.png`. Prefer `evidenceLabel`/`shortName` from the command JSON; do not use the full checklist sentence as the filename. Call `scripts/workbook_output.py --mode text` for text-only reports, or `scripts/workbook_embed_excel_com.ps1` / `scripts/workbook_output.py --mode embed-images` only when the user requested screenshots inside the report.
 8. Report whether SSH or vmrun was used, the output folder, workbook path if created, and any collection or row-mapping failures.
 
 Command list format:
@@ -159,8 +159,11 @@ Fields:
 
 - `id`: screenshot filename prefix; use stable ASCII such as `row05` or `cmd01`.
 - `name`: short descriptive label for `manifest.json`.
-- `command`: shell command pasted into the SSH session.
+- `command`: complete read-only shell command used for raw text collection and workbook inference.
+- `screenshotCommand` or `focusCommand`: optional shorter read-only command used only by `capture-ssh-evidence.ps1` to show the row's key evidence in one readable terminal screenshot. Use it for rows such as password policy where `cat /etc/login.defs` is complete but too long for one screenshot.
+- `evidenceLabel` or `shortName`: optional concise final screenshot label, for example `口令策略`; keep it short and do not copy the full checklist sentence.
 - `waitSeconds`: optional delay before screenshot; increase for long-running commands.
+- `screenshotWaitSeconds`: optional screenshot-only delay override.
 - `row` or `workbookRow`: optional checklist row number for Excel output. Use this when `id` is not row-based.
 - `finding` and `result`: optional workbook output overrides. By default, Linux workbook output summarizes the key command result only; do not write phrases such as `已通过 SSH...`, `检查方式`, or `证据文件` into `检查情况`.
 - `result`: for Linux workbook output, use the fixed choices from the source workbook's result dropdown. Common choices are `符合`, `不符合`, `不适用`, and `未检查`. Choose the appropriate value from command output unless the user explicitly instructs otherwise; use `未检查` for administrator-interview rows or rows that were not operated.
@@ -237,7 +240,9 @@ For Linux/Unix Excel output after SSH capture:
 python .\scripts\ssh_workbook_plan.py `
   --source-workbook D:\WorkSpace\checklist.xlsx `
   --commands-json .\scripts\sample-commands.json `
-  --manifest-json D:\WorkSpace\Evidence\linux-baseline安全检查证据\manifest.json `
+  --manifest-json D:\WorkSpace\Evidence\linux-baseline_raw\manifest.json `
+  --screenshot-manifest-json D:\WorkSpace\Evidence\linux-baseline安全检查证据\manifest.json `
+  --screenshots `
   --task-label linux-baseline `
   --out D:\WorkSpace\Evidence\linux-baseline安全检查证据\tmp\plan.json
 
@@ -461,10 +466,11 @@ Critical inherited rules:
 - `scripts/run-ssh-commands.ps1`: fast no-screenshot SSH command runner that writes text output and `manifest.json`; password SSH delegates to `scripts/run-ssh-commands.py`, while key/agent SSH uses OpenSSH.
 - `scripts/run-ssh-commands.py`: Paramiko-backed password SSH runner for no-screenshot Linux/Unix command output.
 - `scripts/run-guest-commands.ps1`: fast no-screenshot VMware guest command runner that writes text output and `manifest.json`; use as Linux fallback only after the user says SSH is unavailable or cannot be provided.
-- `scripts/capture-ssh-evidence.ps1`: Linux/Unix SSH command screenshot evidence collector; preserve the original workflow when patching it.
-- `scripts/sample-commands.json`: sample Linux security command list and schema reference for SSH evidence collection.
-- `scripts/ssh_workbook_plan.py`: convert Linux/Unix SSH command lists and optional `manifest.json` into workbook output plans that reuse the Windows Excel writers.
-- `scripts/finalize_evidence_names.py`: final-only screenshot renamer; use after capture and before workbook output so collection keeps safe operational names while deliverables use Chinese checklist-item filenames.
+- `scripts/capture-ssh-evidence.ps1`: Linux/Unix SSH command screenshot evidence collector; preserves full command metadata and uses `screenshotCommand`/`focusCommand` when present so long-output rows show the key evidence area.
+- `scripts/linux-baseline-commands.json`: bundled Linux checklist command list; uses complete raw commands for workbook inference and focused screenshot commands for readable evidence.
+- `scripts/sample-commands.json`: minimal Linux security command list and schema reference for SSH evidence collection.
+- `scripts/ssh_workbook_plan.py`: convert Linux/Unix SSH command lists plus optional raw/screenshot manifests into workbook output plans that reuse the Windows Excel writers.
+- `scripts/finalize_evidence_names.py`: final-only screenshot renamer; use after capture and before workbook output so collection keeps safe operational names while deliverables use concise row labels.
 
 Scripts are scaffolds intended to be adjusted for the target environment. Preserve the contracts above when patching them.
 
@@ -487,7 +493,7 @@ Before final response:
 - If screenshot mode is enabled, all supported checklist rows have accepted screenshot evidence or a clear blocker.
 - Windows GUI evidence screenshots are native GUI pages/dialogs, not PowerShell/cmd/Terminal/rendered text substitutes. Any row that could not produce native GUI evidence is reported as a blocker or `needs_user_confirmation`.
 - If screenshot mode is disabled, no screenshot runner was launched and command/text output or plan output is reported.
-- Evidence filenames, when screenshots are requested, follow the final row naming contract: `rowNN_<检查项中文>.png`, with `_补充N` for additional screenshots on the same row, and live under `<label>安全检查证据`.
+- Evidence filenames, when screenshots are requested, follow the final row naming contract: `rowNN_<简写>.png`, with `_补充N` for additional screenshots on the same row, and live under `<label>安全检查证据`.
 - Workbook output, if requested, is a copied workbook and not the original.
 - Workbook output, if requested, has merged `runner_result.json` after evidence collection and validated the written `检查情况`/`结果` values. `整改建议` must remain unchanged. Delete `evidence/tmp` only after both workbook/report validation and evidence-directory validation pass.
 - Workbook output preserves the source workbook's structure, colors, fills, row/column sizes, borders, fonts, alignment, existing shapes, and hyperlinks unless the user explicitly requested formatting/layout changes.

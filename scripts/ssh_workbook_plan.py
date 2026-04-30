@@ -298,6 +298,49 @@ def int_value(values: dict[str, str], key: str) -> int | None:
         return None
 
 
+def first_int_after(names: tuple[str, ...], text: str) -> int | None:
+    name_pattern = "|".join(re.escape(name) for name in names)
+    line_pattern = re.compile(rf"(?i)\b(?:{name_pattern})\s*(?:=|\s)\s*(-?\d+)\b")
+    for line in text.splitlines():
+        candidate = re.sub(r"^(?:[^:\n]+:)?\d+[:-]", "", line.lstrip()).lstrip()
+        if candidate.startswith("#"):
+            continue
+        match = line_pattern.search(candidate)
+        if not match:
+            continue
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def password_quality_details(text: str) -> tuple[bool, list[str]]:
+    details: list[str] = []
+    module_present = bool(re.search(r"pam_(pwquality|cracklib)\.so", text, flags=re.I))
+    minlen = first_int_after(("minlen", "min_len"), text)
+    minclass = first_int_after(("minclass", "min_class"), text)
+    credits = {
+        "数字": first_int_after(("dcredit",), text),
+        "大写字母": first_int_after(("ucredit",), text),
+        "小写字母": first_int_after(("lcredit",), text),
+        "特殊字符": first_int_after(("ocredit",), text),
+    }
+    required_types = [name for name, value in credits.items() if value is not None and value < 0]
+    if module_present:
+        details.append("已引用 pam_pwquality/pam_cracklib")
+    if minlen is not None:
+        details.append(f"复杂度最小长度={minlen}")
+    if minclass is not None:
+        details.append(f"字符类别数={minclass}")
+    if required_types:
+        details.append("强制包含" + "、".join(required_types))
+
+    length_ok = minlen is None or minlen >= 8
+    class_ok = (minclass is not None and minclass >= 3) or len(required_types) >= 3
+    return bool(module_present and length_ok and class_ok), details
+
+
 def summarize_linux_output(row: int, output_text: str, options: list[str]) -> tuple[str, str]:
     text = output_text.replace("\r\n", "\n")
     result = "符合"
@@ -317,24 +360,31 @@ def summarize_linux_output(row: int, output_text: str, options: list[str]) -> tu
     elif row == 6:
         values = pass_values(text)
         max_days = int_value(values, "PASS_MAX_DAYS")
+        min_days = int_value(values, "PASS_MIN_DAYS")
         min_len = int_value(values, "PASS_MIN_LEN")
-        has_quality = "pam_pwquality" in text or "pam_cracklib" in text
+        warn_age = int_value(values, "PASS_WARN_AGE")
+        has_quality, quality_details = password_quality_details(text)
         result = "符合" if (
             max_days is not None and max_days <= 90
+            and min_days is not None and min_days >= 0
             and min_len is not None and min_len >= 10
+            and warn_age is not None and warn_age >= 7
             and has_quality
         ) else "不符合"
         parts = [f"{key}={values[key]}" for key in ("PASS_MAX_DAYS", "PASS_MIN_DAYS", "PASS_MIN_LEN", "PASS_WARN_AGE") if key in values]
-        quality = "已引用 pam_pwquality" if has_quality else "未发现 PAM 复杂度模块"
-        finding = f"/etc/login.defs 显示 {', '.join(parts) or '未读取到 PASS_* 参数'}；{quality}。"
+        quality = "；".join(quality_details) if quality_details else "未发现 PAM 复杂度要求"
+        finding = f"密码策略：{', '.join(parts) or '未读取到 PASS_* 参数'}；{quality}。"
     elif row == 10:
         has_lock = bool(re.search(r"pam_(faillock|tally2)|deny\s*=", text, flags=re.I))
         result = "符合" if has_lock else "不符合"
         finding = "PAM 已配置登录失败锁定参数。" if has_lock else "未发现 pam_faillock/pam_tally2、deny、unlock_time 等登录失败锁定配置。"
     elif row == 11:
         cleaned = "\n".join(clean_lines(text))
-        ssh_active = "active" in cleaned and re.search(r"[:*]22\b", cleaned)
-        telnet_open = bool(re.search(r"[:*]23\b|telnet-server", cleaned, flags=re.I))
+        ssh_active = "active" in cleaned and ("sshd" in cleaned.lower() or re.search(r"(?::|\*)22\b", cleaned))
+        telnet_open = any(
+            "LISTEN" in line and re.search(r"(?<!\d)(?::|\*)23\b", line)
+            for line in cleaned.splitlines()
+        )
         result = "符合" if ssh_active and not telnet_open else "不符合"
         finding = "sshd 为 active/enabled，22 端口监听；未发现 telnet 23 端口监听。" if result == "符合" else "远程管理协议检查发现 SSH 未正常启用或存在 telnet 相关痕迹。"
     elif row == 12:
@@ -418,6 +468,7 @@ def build_plan(
     commands_json: Path,
     task_label: str,
     manifest_json: Path | None,
+    screenshot_manifest_json: Path | None,
     finding_template: str | None,
     result_text: str | None,
     include_screenshots: bool,
@@ -427,7 +478,8 @@ def build_plan(
     header_row, columns = find_header(sheet)
     result_options = result_options_for_sheet(sheet, columns.get("result"))
     commands = load_json_array(commands_json, "commands-json")
-    manifest = manifest_by_id(manifest_json)
+    output_manifest = manifest_by_id(manifest_json)
+    screenshot_manifest = manifest_by_id(screenshot_manifest_json) if screenshot_manifest_json else output_manifest
 
     items: list[dict[str, Any]] = []
     unmapped: list[str] = []
@@ -446,8 +498,14 @@ def build_plan(
         source = row_text(sheet, row, columns)
         name = norm(command.get("name")) or command_id
         command_text = norm(command.get("command"))
-        artifact = command_artifact(command_id, command, manifest)
-        output_text = command_output_text(command_id, command, manifest, manifest_json)
+        evidence_label = norm(
+            command.get("evidenceLabel")
+            or command.get("evidence_label")
+            or command.get("shortName")
+            or command.get("short_name")
+        )
+        artifact = command_artifact(command_id, command, output_manifest)
+        output_text = command_output_text(command_id, command, output_manifest, manifest_json)
         summary_finding, inferred_result = summarize_linux_output(row, output_text, result_options)
         if command.get("finding"):
             finding = str(command["finding"])
@@ -471,7 +529,7 @@ def build_plan(
             )
         else:
             result = normalize_result(str(inferred_result), result_options)
-        evidence = [evidence_name(index, command, manifest)] if include_screenshots else []
+        evidence = [evidence_name(index, command, screenshot_manifest)] if include_screenshots else []
 
         items.append(
             {
@@ -491,6 +549,7 @@ def build_plan(
                 "notes": "Linux/Unix SSH command evidence mapped to workbook output.",
                 "ssh_command": command_text,
                 "artifact": artifact,
+                "evidence_label": evidence_label,
             }
         )
 
@@ -554,6 +613,7 @@ def main() -> None:
     parser.add_argument("--task-label", required=True)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--manifest-json", type=Path)
+    parser.add_argument("--screenshot-manifest-json", type=Path)
     parser.add_argument("--screenshots", action="store_true", help="Map screenshot filenames into the workbook plan.")
     parser.add_argument("--finding-template")
     parser.add_argument("--result-text", default=DEFAULT_RESULT_TEXT)
@@ -568,6 +628,7 @@ def main() -> None:
         commands_json=args.commands_json,
         task_label=args.task_label,
         manifest_json=args.manifest_json,
+        screenshot_manifest_json=args.screenshot_manifest_json,
         finding_template=finding_template,
         result_text=args.result_text,
         include_screenshots=args.screenshots,

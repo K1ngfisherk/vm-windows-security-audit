@@ -1,115 +1,65 @@
-# VM Windows 安全审查 Skill
+# 安全基线检查项目
 
 [English](README.en.md)
 
-`vm-windows-security-audit` 用于根据 Windows 安全检查表审查 VMware 虚拟机，也支持 Linux/Unix 主机执行命令检查。默认走更快的无截图模式；只有用户提到“截图、证据、取证、screenshot、evidence”等关键词时，才启用截图采集。Linux/Unix 先问客户要 SSH IP、账户和密码/密钥并优先 SSH；只有用户明确说没有 SSH 或提供不了连接信息时，才走 `vmrun`。
+这是一个用于安全基线检查的辅助项目，面向 Windows、Linux/Unix、数据库服务等常见检查对象。项目围绕安全检查表开展核查，整理检查结果，并生成报告和证据材料。
 
-## 适用场景
+## 项目简介
 
-- Windows Server 安全基线检查。
-- Linux/Unix 安全基线检查、主机核查、应急响应核验。
-- 需要快速完成、不要求截图证据的审查任务。
-- 需要按照表格逐项截图取证的审查任务。
-- VMware Workstation 虚拟机中的 Windows 系统检查。
-- 需要保留原始 GUI 证据，而不是只导出命令结果的任务。
-- 需要通过 SSH 命令输出保留截图证据的任务。
+项目可以根据检查表内容，对目标系统的账号策略、访问控制、审计配置、服务端口、远程管理、数据库配置等内容进行核查。
 
-## 功能概览
+它适合用于安全基线检查、课堂作业、复查验收、运维自查和安全加固前后的对比记录。
 
-- 自动分析 `.xlsx` 检查表，识别检查项、预期结果和操作说明。
-- 支持常见 Windows 管理界面，包括本地安全策略、组策略、本地用户和组、服务、事件查看器、共享文件夹、注册表和控制面板。
-- Windows 截图证据必须是原生 GUI 页面或对话框；不能用 PowerShell、cmd、Windows Terminal、命令输出或渲染 PNG 替代。原生页面无法采集时会停止并询问用户。
-- 使用 `scripts/audit_mode.py` 判断是否需要截图；默认不截图。
-- Linux/Unix 无截图时用 `scripts/run-linux-commands.ps1`，先 SSH；`vmrun` 需要用户明确说没有 SSH 或给不了 IP/账户/密码后才允许。
-- 需要截图时按检查表行号保存截图证据，例如 `row11_gpedit_rdp_client_connection_encryption_level.png`。
-- 对截图进行基础有效性和页面内容检查，减少截图页面与检查项不匹配的问题。
-- 支持离线准备虚拟机中的 Python 和 GUI 自动化依赖。
-- Windows GUI 取证会使用当前客户机用户目录下的受控工作目录，例如 `C:\Users\<用户名>\CodexVmAudit`。走离线包时无论客户机是否已有 Python，都把离线 Python 安装到这个目录下，并通过 manifest 使用绝对 `python.exe` 路径，不依赖 PATH。
-- 安全检查成功后默认清理客户机内的 venv、托管 Python、离线包、脚本和临时文件；客户机原有 Python 不会被卸载。排障时可保留临时环境。
-- 可选生成 Excel 报告；默认只允许写 `检查情况` 和 `结果` 两列，`整改建议` 列必须保持原值和原格式不变。
-- 识别到 Linux/Unix 检测时，先向客户确认 SSH IP、账户和密码/密钥，默认用 SSH 输出命令文本与 `manifest.json`；客户明确说没有 SSH 或提供不了连接信息时，再用 VMware Tools/`vmrun` 直接执行命令；仅在用户要求截图/证据时使用 Windows Terminal + OpenSSH 生成每条命令的截图。
-- Linux/Unix SSH 取证也可输出复制版 Excel；命令可通过 `row`/`workbookRow` 或 `row05` 这类标记映射回检查表行。
-- 最终交付前会把截图重命名为中文检查项名称，例如 `row05_应对登录操作系统和数据库系统的用户进行身份标识和鉴别.png`。
-- 涉及访谈管理员的检查项不会执行 GUI 或命令操作，会在 `检查情况` 写入 `涉及访谈管理员，未进行操作`，在 `结果` 写入 `未检查`。
+## 支持对象
 
-## 使用前准备
-
-宿主机需要：
-
-- Windows 系统。
-- VMware Workstation 或兼容的 `vmrun.exe`。
-- 可访问目标虚拟机的 `.vmx` 文件。
-- 可访问源检查表 `.xlsx`。
-- 如果需要生成嵌图版 Excel 报告，需要安装 Microsoft Excel。
-- Linux/Unix 无截图 SSH 支持密码和密钥：密码路径使用 Python/Paramiko，密钥或 agent 路径使用 OpenSSH。截图取证需要 Windows Terminal（`wt.exe`）、OpenSSH 客户端（`ssh.exe`）、目标 SSH 连通性和有效凭据或密钥。
-
-虚拟机需要：
-
-- Windows 系统。
-- VMware Tools 正常运行。
-- 已登录到桌面。
-- 提供用于检查的 guest 用户名和密码。
-- Windows Server 截图取证必须提供真实已登录桌面的 Windows 账号，并在调用编排脚本时显式传入 `-InteractiveGuestUser`；未提供时应先询问用户，不能回退到 Guest/访客账户。
-
-## 工作流程
-
-Windows VMware 检查：
-
-1. 读取检查表并生成检查计划。
-2. 检查虚拟机环境和桌面状态。
-3. 准备虚拟机中的运行环境。
-4. 逐项打开对应的 Windows 管理界面。
-5. 默认不采集截图；如果命中截图/证据关键词，再采集并校验截图证据。
-6. 保存最终截图或无截图命令输出。
-7. 如果用户需要，生成 Excel 报告。
-
-Linux/Unix SSH 检查：
-
-1. 准备命令 JSON，可参考 `scripts/sample-commands.json`。
-2. 默认运行 `scripts/run-linux-commands.ps1`，使用 SSH 输出每条命令的 `.txt` 和 `manifest.json`。
-3. 只有用户说没有 SSH 或提供不了 IP/账户/密码时，才带 `-AllowVmrunFallback` 走 `vmrun`。
-4. 用户要求截图/证据时，优先改用 `scripts/capture-ssh-evidence.ps1` 保留 SSH 截图流程。
-5. 截图模式下校验输出目录中的截图和 `manifest.json`。
-6. 如果需要表格输出，运行 `scripts/ssh_workbook_plan.py` 生成计划；截图模式再用 `scripts/finalize_evidence_names.py` 最终中文重命名，最后用 `scripts/workbook_output.py` 或 `scripts/workbook_embed_excel_com.ps1` 输出复制版 Excel。需要依赖 `runner_result.json` 的报告会先保留本机 `tmp`，写表并校对通过后再清理。
+- Windows Server 虚拟机
+- Linux/Unix 主机
+- Docker 中运行的数据库服务
+- MySQL/MariaDB 等常见数据库场景
 
 ## 输出内容
 
-默认输出在源检查表同级目录，证据目录不加时间戳，报告文件名加时间戳。
+项目通常会生成：
+
+- Excel 安全检查报告
+- 截图证据目录
+- 命令输出或检查记录
+- 与检查对象对应的结果汇总
+
+输出示例：
 
 ```text
-<label>安全检查证据\
-<label>安全检查报告_<yyyyMMdd_HHmmss>.xlsx
+centos安全检查报告.xlsx
+centos安全检查证据\
 ```
 
-Linux/Unix SSH 证据输出目录：
+截图文件会使用简短名称，方便查看和归档，例如：
 
 ```text
-<OutputRoot>\<label>安全检查证据\
+row05_身份鉴别.png
+row06_口令策略.png
+row22_服务端口.png
+row24_超时锁定.png
 ```
 
-证据截图命名格式：
+## 项目特点
 
-```text
-rowNN_<检查项中文>.png
-```
+- 支持 Windows 图形化界面检查。
+- 支持 Linux/Unix SSH 检查。
+- 支持数据库服务基础安全检查。
+- 支持生成 Excel 报告。
+- 支持保存截图证据。
+- 支持把长命令输出整理为更容易查看的关键证据。
 
-最终证据目录中主要包含可用于交付的截图文件；无截图模式则输出逐条命令文本和 `manifest.json`。过程脚本、JSON、日志、诊断图等可临时放在证据目录的 `tmp` 下，必须等报告和证据都检查完成后再删除。报告文件只在用户要求生成时创建。
-如果 Linux/Unix 检查需要 Excel，输出为原检查表的复制版。`检查情况` 只写命令关键结果和简要描述，不写“已通过 SSH”“检查方式”“证据文件”等过程性文字；`结果` 从原表固定选项中选择，通常为 `符合`、`不符合`、`不适用`、`未检查`。`整改建议` 只读，不能写入、清空或改样式。
+## 典型场景
 
-## 当前覆盖范围
+- 按安全基线表检查服务器配置。
+- 对多台虚拟机生成统一格式报告。
+- 为安全课程、实验或作业整理检查材料。
+- 对加固前后的系统状态进行对比。
+- 为复核、验收或归档准备证据截图。
 
-已内置的常见检查包括：
-
-- 本地安全策略：密码策略、账户锁定策略、审核策略、安全选项。
-- 组策略：远程桌面加密级别、空闲会话限制、连接数限制。
-- 本地用户和组：用户列表、默认账户、Guest 属性、Administrators 成员。
-- 服务：Remote Registry 等服务配置。
-- 事件查看器：System 日志及属性页。
-- 共享文件夹、LSA 注册表项、已安装更新页面。
-- 身份信息等需要可见窗口展示的辅助检查；访谈管理员类检查项按未操作、未检查写入报告。
-- Linux/Unix 命令输出或截图结果映射回检查表行并复用同一套 Excel 输出脚本。
-
-## 目录结构
+## 项目结构
 
 ```text
 vm-windows-security-audit/
@@ -121,9 +71,3 @@ vm-windows-security-audit/
 ├── references/
 └── scripts/
 ```
-
-## 说明
-
-- 原始检查表不会被直接修改。
-- Excel 报告、超链接和压缩包属于可选输出。
-- 不同 Windows 版本、语言和显示缩放可能导致部分 GUI 路径需要适配。

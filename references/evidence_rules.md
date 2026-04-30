@@ -17,9 +17,9 @@
 - Do not use timestamped evidence folders or nested `最终截图证据` folders unless requested or needed to avoid a naming collision.
 - The final evidence directory root should contain accepted final screenshots only when screenshot mode is enabled, not logs, stdout/stderr captures, runtime JSON files, JSON diagnostics, helper scripts, contact sheets, or preview files.
 - Screenshot filenames:
-  - Lowercase ASCII.
+  - Use concise labels; do not copy the full checklist sentence into the filename.
   - Prefix with workbook row number: `rowNN_`.
-  - Include a stable tool/source and check key.
+  - Include a stable short tool/source/check label.
   - End in `.png`.
 
 Examples:
@@ -29,6 +29,8 @@ row06_secpol_password_policy.png
 row11_gpedit_rdp_client_connection_encryption_level.png
 row16_lusrmgr_administrators_members.png
 row16_services_mysql_logon_account.png
+row06_口令策略.png
+row24_超时锁定.png
 ```
 
 ## Screenshot Acceptance

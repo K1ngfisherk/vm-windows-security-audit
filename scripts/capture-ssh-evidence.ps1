@@ -75,7 +75,37 @@ function Get-TerminalByTitle([string]$Title, [int]$TimeoutSeconds = 25) {
 function Invoke-TerminalPaste([IntPtr]$Hwnd, [string]$Text) {
   [SshEvidenceWin32]::SetForegroundWindow($Hwnd) | Out-Null
   Start-Sleep -Milliseconds 250
-  Set-Clipboard $Text
+  $clipboardSet = $false
+  for ($attempt = 1; $attempt -le 8; $attempt++) {
+    try {
+      Set-Clipboard $Text
+      $clipboardSet = $true
+      break
+    } catch {
+      Start-Sleep -Milliseconds (150 * $attempt)
+    }
+  }
+  if (-not $clipboardSet) {
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'clip.exe'
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.CreateNoWindow = $true
+    $clip = [System.Diagnostics.Process]::Start($startInfo)
+    try {
+      $clip.StandardInput.Write($Text)
+      $clip.StandardInput.Close()
+      $clipExited = $clip.WaitForExit(3000)
+      if ($clipExited -and $clip.ExitCode -eq 0) {
+        $clipboardSet = $true
+      } elseif (-not $clipExited -and -not $clip.HasExited) {
+        $clip.Kill()
+      }
+    } catch {
+      if ($clip -and -not $clip.HasExited) { $clip.Kill() }
+    }
+  }
+  if (-not $clipboardSet) { throw "Failed to set clipboard text for terminal paste." }
   $shell = New-Object -ComObject WScript.Shell
   $shell.SendKeys('^v')
   Start-Sleep -Milliseconds 200
@@ -145,16 +175,27 @@ foreach ($item in $commands) {
     $wait = [int]$item.waitSeconds
   }
   if ($wait -lt 0) { $wait = $DefaultWaitSeconds }
+  if (($item.PSObject.Properties.Name -contains 'screenshotWaitSeconds') -and $null -ne $item.screenshotWaitSeconds -and -not [string]::IsNullOrWhiteSpace([string]$item.screenshotWaitSeconds)) {
+    $wait = [int]$item.screenshotWaitSeconds
+  }
+  $commandText = [string]$item.command
+  $screenshotCommand = $commandText
+  if (($item.PSObject.Properties.Name -contains 'screenshotCommand') -and -not [string]::IsNullOrWhiteSpace([string]$item.screenshotCommand)) {
+    $screenshotCommand = [string]$item.screenshotCommand
+  } elseif (($item.PSObject.Properties.Name -contains 'focusCommand') -and -not [string]::IsNullOrWhiteSpace([string]$item.focusCommand)) {
+    $screenshotCommand = [string]$item.focusCommand
+  }
   $fileName = ('{0:D2}_{1}.png' -f $index, $id)
   $screenshotPath = Join-Path $outputDir $fileName
-  Invoke-TerminalPaste $hwnd ([string]$item.command)
+  Invoke-TerminalPaste $hwnd $screenshotCommand
   Start-Sleep -Seconds $wait
   Save-WindowScreenshot $hwnd $screenshotPath
   $manifest.Add([pscustomobject]@{
     index = $index
     id = $id
     name = $name
-    command = [string]$item.command
+    command = $commandText
+    screenshotCommand = $screenshotCommand
     waitSeconds = $wait
     screenshot = $screenshotPath
     capturedAt = (Get-Date).ToString('s')

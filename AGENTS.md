@@ -85,9 +85,13 @@ Linux/Unix route:
 5. vmrun fallback: `scripts/run-guest-commands.ps1`, only after explicit user
    statement that SSH is unavailable or cannot be provided.
 6. Screenshot path, only when requested: `scripts/capture-ssh-evidence.ps1`.
-7. Excel plan: `scripts/ssh_workbook_plan.py`.
-8. Final screenshot Chinese names: `scripts/finalize_evidence_names.py`.
-9. Workbook output: `scripts/workbook_output.py` or
+7. For long-output rows, command JSON may use a complete `command` for raw text
+   collection plus `screenshotCommand`/`focusCommand` for readable key-region
+   screenshots.
+8. Excel plan: `scripts/ssh_workbook_plan.py`; pass raw and screenshot manifests
+   separately when both were collected.
+9. Final concise screenshot names: `scripts/finalize_evidence_names.py`.
+10. Workbook output: `scripts/workbook_output.py` or
    `scripts/workbook_embed_excel_com.ps1`.
 
 Docker MySQL route:
@@ -123,8 +127,10 @@ Docker MySQL route:
 - `scripts/run-ssh-commands.py`: no-screenshot Paramiko/password runner.
 - `scripts/run-guest-commands.ps1`: vmrun command fallback.
 - `scripts/capture-ssh-evidence.ps1`: SSH screenshot collector.
+- `scripts/linux-baseline-commands.json`: bundled Linux checklist commands with
+  focused screenshot commands for long outputs.
 - `scripts/ssh_workbook_plan.py`: Linux command output to workbook plan.
-- `scripts/finalize_evidence_names.py`: final screenshot Chinese renamer.
+- `scripts/finalize_evidence_names.py`: final screenshot concise renamer.
 - `references/check_patterns.json`: Windows row pattern to GUI action mapping.
 - `references/evidence_rules.md`: acceptance rules for screenshots and reports.
 
