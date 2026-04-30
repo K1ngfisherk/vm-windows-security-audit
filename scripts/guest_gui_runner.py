@@ -32,6 +32,8 @@ except Exception:  # pragma: no cover - optional dependency guard for damaged gu
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.12
 CREATE_NEW_CONSOLE = 0x00000010
+ADMIN_INTERVIEW_FINDING = "涉及访谈管理员，未进行操作"
+ADMIN_INTERVIEW_RESULT = "未检查"
 
 UIA_DUMP_SCRIPT = r"""
 $ErrorActionPreference = "SilentlyContinue"
@@ -104,6 +106,28 @@ class EvidenceValidationError(RuntimeError):
     """Raised when a screenshot exists but does not prove the requested row."""
 
 
+class UserConfirmationRequiredError(EvidenceValidationError):
+    """Raised when the only available path would violate the evidence contract."""
+
+
+COMMAND_WINDOW_TITLE_TOKENS = (
+    "windows powershell",
+    "powershell",
+    "windows terminal",
+    "command prompt",
+    "cmd.exe",
+    "命令提示符",
+    "_visible",
+)
+
+BAD_FOREGROUND_TITLE_TOKENS = COMMAND_WINDOW_TITLE_TOKENS + (
+    "optionalfeatures",
+    "windows features",
+    "windows 功能",
+)
+
+GA_ROOT = 2
+
 SEMANTIC_RULES: list[tuple[str, dict[str, Any]]] = [
     ("secpol_password_policy", {
         "must_all_any": [["本地安全策略", "local security policy", "secpol"], ["密码策略", "password policy", "密码必须符合复杂性要求"]],
@@ -114,11 +138,19 @@ SEMANTIC_RULES: list[tuple[str, dict[str, Any]]] = [
         "forbid_any": ["本地组策略", "local group policy", "gpedit", "本地用户和组", "local users and groups"],
     }),
     ("secpol_audit_policy", {
-        "must_all_any": [["本地安全策略", "local security policy", "secpol"], ["审核策略", "audit policy"]],
+        "must_all_any": [
+            ["本地安全策略", "local security policy", "secpol"],
+            ["审核策略", "audit policy"],
+            ["审核帐户登录事件", "审核账户登录事件", "audit account logon events", "审核登录事件", "audit logon events"],
+        ],
         "forbid_any": ["本地组策略", "local group policy", "gpedit", "本地用户和组", "local users and groups"],
     }),
     ("secpol_security_options", {
-        "must_all_any": [["本地安全策略", "local security policy", "secpol"], ["安全选项", "security options"]],
+        "must_all_any": [
+            ["本地安全策略", "local security policy", "secpol"],
+            ["安全选项", "security options"],
+            ["交互式登录", "interactive logon", "关机: 清除虚拟内存页面文件", "clear virtual memory pagefile", "microsoft 网络客户端"],
+        ],
         "forbid_any": ["本地组策略", "local group policy", "gpedit", "本地用户和组", "local users and groups"],
     }),
     ("gpedit_rdp_client_connection_encryption_level", {
@@ -145,9 +177,16 @@ SEMANTIC_RULES: list[tuple[str, dict[str, Any]]] = [
         "must_all_any": [
             ["本地用户和组", "local users and groups", "lusrmgr"],
             ["administrator"],
-            ["defaultaccount"],
             ["guest"],
-            ["wdagutilityaccount"],
+        ],
+        "forbid_any": ["本地组策略", "local group policy", "gpedit"],
+    }),
+    ("lusrmgr_users", {
+        "must_all_any": [
+            ["本地用户和组", "local users and groups", "lusrmgr"],
+            ["用户", "users"],
+            ["administrator"],
+            ["guest"],
         ],
         "forbid_any": ["本地组策略", "local group policy", "gpedit"],
     }),
@@ -193,16 +232,21 @@ SEMANTIC_RULES: list[tuple[str, dict[str, Any]]] = [
         "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
     }),
     ("control_installed_updates", {
-        "must_any": ["installed updates", "已安装更新", "已安装的更新"],
-        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
-    }),
-    ("identity_users", {
-        "must_any": ["identity_users_visible", "row"],
-        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
-    }),
-    ("admin_auth_method", {
-        "must_any": ["admin_auth_method_visible", "row"],
-        "forbid_any": ["本地组策略", "local group policy", "本地用户和组", "local users and groups"],
+        "must_all_any": [
+            ["installed updates", "已安装更新", "已安装的更新"],
+            ["kb", "microsoft windows", "update for microsoft windows", "security update", "更新"],
+        ],
+        "forbid_any": [
+            "本地组策略",
+            "local group policy",
+            "本地用户和组",
+            "local users and groups",
+            "windows features",
+            "windows 功能",
+            "optionalfeatures",
+            "卸载或更改程序",
+            "uninstall or change a program",
+        ],
     }),
 ]
 
@@ -216,6 +260,7 @@ class Runner:
         self.debug = debug
         self.log_path = self.tmp_dir / "guest_gui_runner.log"
         self.log_path.write_text("", encoding="utf-8")
+        self.delivery_results: dict[int, dict[str, str]] = {}
 
     def log(self, message: str) -> None:
         with self.log_path.open("a", encoding="utf-8") as handle:
@@ -352,6 +397,84 @@ class Runner:
         if width * height > screen_w * screen_h * 0.45 and not allow_window:
             return False
         return True
+
+    def window_rect_for_hwnd(self, hwnd: int | None = None) -> tuple[int, int, int, int, int]:
+        user32 = ctypes.windll.user32
+        if hwnd is None:
+            hwnd = int(user32.GetForegroundWindow())
+        if not hwnd:
+            raise EvidenceValidationError("No foreground window is available for GUI interaction")
+        root = int(user32.GetAncestor(hwnd, GA_ROOT)) or int(hwnd)
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(root, ctypes.byref(rect)):
+            raise EvidenceValidationError(f"Could not read target window rectangle for hwnd={root}")
+        return root, int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+
+    def assert_point_in_window(self, x: int, y: int, *, hwnd: int | None = None, phase: str = "click") -> int:
+        root, left, top, right, bottom = self.window_rect_for_hwnd(hwnd)
+        if not (left <= x <= right and top <= y <= bottom):
+            diag = self.tmp_shot(f"{phase}_out_of_window_click.png")
+            raise EvidenceValidationError(
+                f"Refusing window-outside click at {phase}: point={x},{y}; "
+                f"target_rect={left},{top},{right},{bottom}; diagnostic={Path(diag).name}"
+            )
+        return root
+
+    def foreground_title(self) -> str:
+        try:
+            active = gw.getActiveWindow()
+            return (getattr(active, "title", "") or "").strip()
+        except Exception:
+            return ""
+
+    def assert_foreground_native_gui(self, item: dict[str, Any] | None, phase: str, *, allow_command_window: bool = False) -> None:
+        title = self.foreground_title()
+        folded = title.casefold()
+        hits = [token for token in BAD_FOREGROUND_TITLE_TOKENS if token in folded]
+        command_hits = [token for token in COMMAND_WINDOW_TITLE_TOKENS if token in folded]
+        if (command_hits and not allow_command_window) or any(token in hits for token in ("optionalfeatures", "windows features", "windows 功能")):
+            row = int(item["row"]) if item and item.get("row") is not None else 0
+            prefix = f"row{row:02d}_" if row else ""
+            diag = self.tmp_shot(f"{prefix}{phase}_bad_foreground.png")
+            raise EvidenceValidationError(
+                f"Refusing GUI evidence at {phase}: foreground window is {title!r}; "
+                f"hits={hits}; diagnostic={Path(diag).name}"
+            )
+
+    def activate_hwnd(self, hwnd: int) -> None:
+        try:
+            user32 = ctypes.windll.user32
+            user32.ShowWindow(hwnd, 5)
+            user32.SetForegroundWindow(hwnd)
+            self.wait(0.15)
+        except Exception as exc:
+            self.log(f"activate-hwnd failed hwnd={hwnd}: {exc!r}")
+
+    def verify_navigation_after_click(self, item: dict[str, Any], phase: str, extra: Iterable[str]) -> None:
+        tokens_by_phase = {
+            "secpol_password_policy": [["密码策略", "Password Policy"], ["密码必须符合复杂性要求", "Maximum password age", "强制密码历史"]],
+            "secpol_account_lockout_policy": [["帐户锁定策略", "账户锁定策略", "Account Lockout Policy"], ["锁定阈值", "Account lockout threshold"]],
+            "secpol_audit_policy": [["审核策略", "Audit Policy"], ["审核登录事件", "Audit logon events", "审核帐户登录事件"]],
+            "secpol_security_options": [["安全选项", "Security Options"], ["交互式登录", "Interactive logon", "关机: 清除虚拟内存页面文件"]],
+            "lusrmgr_users_node": [["用户", "Users"], ["Administrator", "Guest"]],
+            "fsmgmt_shares_node": [["共享", "Shares"], ["共享路径", "Shared Path", "描述", "Description"]],
+            "gpedit_administrative_templates": [["管理模板", "Administrative Templates"], ["Windows 组件", "Windows Components", "所有设置", "All Settings"]],
+            "gpedit_windows_components": [["Windows 组件", "Windows Components"], ["远程桌面服务", "Remote Desktop Services", "终端服务"]],
+            "gpedit_remote_desktop_services": [["远程桌面服务", "Remote Desktop Services", "终端服务"], ["远程桌面会话主机", "Remote Desktop Session Host"]],
+            "gpedit_remote_desktop_session_host": [["远程桌面会话主机", "Remote Desktop Session Host"], ["安全", "Security", "连接", "Connections", "会话时间限制"]],
+        }
+        groups = tokens_by_phase.get(phase)
+        if groups:
+            self.require_visible_token_groups(item, f"{phase}_after_click", groups)
+            return
+        search = [str(token).strip() for token in extra if str(token).strip()]
+        if search:
+            text = self.visible_text().casefold()
+            if not any(token.casefold() in text for token in search):
+                diag = self.tmp_shot(f"row{int(item['row']):02d}_{phase}_post_click_missing.png")
+                raise EvidenceValidationError(
+                    f"Post-click verification failed at {phase}; expected one of {search}; diagnostic={Path(diag).name}"
+                )
 
     def find_text_element(self, keywords: Iterable[str], *, allow_window: bool = False) -> tuple[dict[str, Any], str] | None:
         search = [token.strip() for token in keywords if token and token.strip() and "?" not in token]
@@ -607,8 +730,18 @@ class Runner:
             )
         list_item, token = found
         self.click_listview_item(list_item, token, double=double, delay=delay)
+        if double:
+            self.verify_navigation_after_click(item, phase, extra)
 
-    def click_listview_item(self, item: dict[str, Any], token: str, *, double: bool = False, delay: float = 0.8) -> None:
+    def click_listview_item(
+        self,
+        item: dict[str, Any],
+        token: str,
+        *,
+        double: bool = False,
+        expand: bool = False,
+        delay: float = 0.8,
+    ) -> None:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
         LVM_FIRST = 0x1000
@@ -665,10 +798,13 @@ class Runner:
         point.x = int(rect.left + max(4, (rect.right - rect.left) // 2))
         point.y = int(rect.top + max(4, (rect.bottom - rect.top) // 2))
         user32.ClientToScreen(hwnd, ctypes.byref(point))
-        if double:
-            pyautogui.doubleClick(point.x, point.y)
-        else:
-            pyautogui.click(point.x, point.y)
+        self.assert_foreground_native_gui(None, f"list_{token}")
+        root = self.assert_point_in_window(point.x, point.y, hwnd=hwnd, phase=f"list_{token}")
+        self.activate_hwnd(root)
+        pyautogui.click(point.x, point.y)
+        self.wait(0.15)
+        if double or expand:
+            pyautogui.press("enter")
         self.log(f"win32-list-click token={token!r} text={item.get('text')!r} hwnd={hwnd} index={index} at={point.x},{point.y}")
         self.wait(delay)
 
@@ -678,6 +814,7 @@ class Runner:
         phase: str,
         extra: Iterable[str] = (),
         double: bool = False,
+        expand: bool = False,
         delay: float = 0.8,
         include_item_keywords: bool = False,
         scroll_attempts: int = 0,
@@ -702,7 +839,9 @@ class Runner:
             if list_found:
                 list_item, token = list_found
                 self.log(f"win32-list-found phase={phase} attempt={attempt} row_keywords={row_keywords} search_keywords={keywords} found={list_item}")
-                self.click_listview_item(list_item, token, double=double, delay=delay)
+                self.click_listview_item(list_item, token, double=double, expand=expand, delay=delay)
+                if double or expand:
+                    self.verify_navigation_after_click(item, phase, extra)
                 return
             if attempt < scroll_attempts:
                 if scroll_key == "wheel":
@@ -719,12 +858,19 @@ class Runner:
         element, token = found
         x = int(element["x"] + max(2, element["w"] // 2))
         y = int(element["y"] + max(2, element["h"] // 2))
-        if double:
-            pyautogui.doubleClick(x, y)
-        else:
-            pyautogui.click(x, y)
+        self.assert_foreground_native_gui(item, phase)
+        hwnd = self.assert_point_in_window(x, y, phase=phase)
+        self.activate_hwnd(hwnd)
+        pyautogui.click(x, y)
+        self.wait(0.15)
+        if expand:
+            pyautogui.press("right")
+        elif double:
+            pyautogui.press("enter")
         self.log(f"text-clicked phase={phase} token={token!r} at={x},{y}")
         self.wait(delay)
+        if double or expand:
+            self.verify_navigation_after_click(item, phase, extra)
 
     def set_english_input(self, phase: str) -> None:
         """Ask the foreground window to use the US keyboard layout before ASCII list search."""
@@ -836,11 +982,21 @@ class Runner:
         return self.active_window(win.title)
 
     def click(self, win: Any, x: int, y: int, delay: float = 0.4) -> None:
-        pyautogui.click(win.left + x, win.top + y)
+        px = int(win.left + x)
+        py = int(win.top + y)
+        hwnd = int(getattr(win, "_hWnd", 0) or getattr(win, "hWnd", 0) or 0) or None
+        root = self.assert_point_in_window(px, py, hwnd=hwnd, phase="coordinate_click")
+        self.activate_hwnd(root)
+        pyautogui.click(px, py)
         self.wait(delay)
 
     def double_click(self, win: Any, x: int, y: int, delay: float = 0.8) -> None:
-        pyautogui.doubleClick(win.left + x, win.top + y)
+        px = int(win.left + x)
+        py = int(win.top + y)
+        hwnd = int(getattr(win, "_hWnd", 0) or getattr(win, "hWnd", 0) or 0) or None
+        root = self.assert_point_in_window(px, py, hwnd=hwnd, phase="coordinate_double_click")
+        self.activate_hwnd(root)
+        pyautogui.doubleClick(px, py)
         self.wait(delay)
 
     def image_stats(self, image: Any) -> dict[str, Any]:
@@ -879,14 +1035,21 @@ class Runner:
             active_title = ""
         return {"active_title": active_title, "windows": windows}
 
-    def semantic_rule(self, filename: str) -> dict[str, Any] | None:
-        key = Path(filename).stem.lower()
+    def semantic_rule(self, filename: str, semantic_hint: str | None = None) -> dict[str, Any] | None:
+        key = f"{Path(filename).stem.lower()} {str(semantic_hint or '').lower()}"
         for marker, rule in SEMANTIC_RULES:
             if marker in key:
                 return rule
         return None
 
-    def validate_candidate(self, filename: str, image: Any) -> dict[str, Any]:
+    def validate_candidate(
+        self,
+        filename: str,
+        image: Any,
+        *,
+        allow_command_window: bool = False,
+        semantic_hint: str | None = None,
+    ) -> dict[str, Any]:
         stats = self.image_stats(image)
         snapshot = self.window_snapshot()
         ui_elements = self.uia_elements()
@@ -896,10 +1059,17 @@ class Runner:
             + [self.element_text(e) for e in ui_elements]
             + [str(item.get("row_text") or item.get("text") or "") for item in list_items]
         ).casefold()
-        rule = self.semantic_rule(filename)
+        rule = self.semantic_rule(filename, semantic_hint)
         failures: list[str] = []
         if not stats["image_usable"]:
             failures.append(f"blank_or_low_information_image stats={stats}")
+        active_title = snapshot.get("active_title", "").casefold()
+        command_window_hits = [token for token in COMMAND_WINDOW_TITLE_TOKENS if token in active_title]
+        if command_window_hits and not allow_command_window:
+            failures.append(
+                "non_native_gui_command_window_active="
+                f"{snapshot.get('active_title', '')!r}; ask_user_before_using_command_window_evidence"
+            )
         if rule:
             must_any = [token.casefold() for token in rule.get("must_any", [])]
             must_all_any = [[token.casefold() for token in group] for group in rule.get("must_all_any", [])]
@@ -919,19 +1089,35 @@ class Runner:
             "image": stats,
             "active_title": snapshot["active_title"],
             "window_titles": [w["title"] for w in snapshot["windows"]],
+            "command_window_evidence_allowed": allow_command_window,
+            "semantic_hint": semantic_hint or "",
             "matched_ui_text_sample": ui_text[:500],
         }
 
-    def shot(self, filename: str, *, final: bool = True) -> str:
+    def shot(
+        self,
+        filename: str,
+        *,
+        final: bool = True,
+        allow_command_window: bool = False,
+        semantic_hint: str | None = None,
+    ) -> str:
         root = self.out_dir if final else self.tmp_dir
         target = root / Path(filename).name
         target.parent.mkdir(parents=True, exist_ok=True)
         self.wait(0.7)
+        if final:
+            self.assert_foreground_native_gui(None, f"before_screenshot_{Path(filename).stem}", allow_command_window=allow_command_window)
         image = pyautogui.screenshot()
         if final:
             candidate = self.tmp_dir / f"candidate_{target.name}"
             image.save(candidate)
-            validation = self.validate_candidate(target.name, image)
+            validation = self.validate_candidate(
+                target.name,
+                image,
+                allow_command_window=allow_command_window,
+                semantic_hint=semantic_hint,
+            )
             validation_path = self.tmp_dir / f"{target.stem}.validation.json"
             validation_path.write_text(json.dumps(validation, ensure_ascii=False, indent=2), encoding="utf-8")
             self.log(f"validation {target.name} {json.dumps(validation, ensure_ascii=False)}")
@@ -944,6 +1130,46 @@ class Runner:
 
     def tmp_shot(self, filename: str) -> str:
         return self.shot(filename, final=False)
+
+    def evidence_shot(
+        self,
+        item: dict[str, Any],
+        filename: str,
+        *,
+        semantic_hint: str | None = None,
+        allow_command_window: bool = False,
+    ) -> str:
+        hint_parts = [
+            semantic_hint or "",
+            str(item.get("gui_action") or ""),
+            str(item.get("check_id") or ""),
+            str(item.get("evidence_slug") or ""),
+        ]
+        hint = " ".join(part for part in hint_parts if part)
+        return self.shot(filename, allow_command_window=allow_command_window, semantic_hint=hint)
+
+    def delivery_result_for_item(self, item: dict[str, Any]) -> dict[str, str]:
+        action = str(item.get("gui_action") or item.get("check_id") or "")
+        text = self.visible_text()
+        folded = text.casefold()
+        if action == "gpedit_rdp_client_connection_encryption_level":
+            if "未配置" in text or "not configured" in folded:
+                return {"finding": "远程桌面客户端连接加密级别策略为未配置。", "result": "不符合"}
+            if "已启用" in text or "enabled" in folded:
+                return {"finding": "远程桌面客户端连接加密级别策略已启用。", "result": "符合"}
+        if action == "services_remote_registry":
+            return {"finding": "Remote Registry 服务状态已在服务管理器中显示。"}
+        if action == "control_installed_updates":
+            kbs = sorted(set(re.findall(r"\bKB\d{6,8}\b", text, flags=re.I)))
+            if kbs:
+                return {"finding": f"已安装更新页面可见补丁：{', '.join(kbs[:8])}。"}
+            return {"finding": "已安装更新页面已打开，未从可见区域识别到 KB 编号。"}
+        return {}
+
+    def record_delivery_result(self, item: dict[str, Any]) -> None:
+        result = self.delivery_result_for_item(item)
+        if result:
+            self.delivery_results[int(item["row"])] = result
 
     def cleanup_tmp(self) -> None:
         cleanup_tmp_dir(self.out_dir)
@@ -987,7 +1213,17 @@ class Runner:
         self.wait(4.0)
         return self.maximize(self.wait_window(["注册表编辑器", "Registry Editor"]))
 
-    def visible_cmd(self, row: int, name: str, commands: list[str], filename: str) -> list[str]:
+    def command_window_evidence_allowed(self, item: dict[str, Any]) -> bool:
+        value = item.get("allow_command_window_evidence") or item.get("explicit_command_window_evidence")
+        return str(value).casefold() in {"1", "true", "yes", "y"}
+
+    def visible_cmd(self, item: dict[str, Any], name: str, commands: list[str], filename: str) -> list[str]:
+        row = int(item["row"])
+        if not self.command_window_evidence_allowed(item):
+            raise UserConfirmationRequiredError(
+                f"Row {row} would require command-window evidence ({name}), but Windows screenshot evidence must be a native GUI page. "
+                "Stop and ask the user whether to authorize command-window evidence or provide a manual/native-GUI path."
+            )
         self.kill_ui()
         bat = self.tmp_dir / f"row{row:02d}_{name}_visible.cmd"
         lines = [
@@ -1010,35 +1246,35 @@ class Runner:
             self.maximize(win)
         except Exception as exc:
             self.log(f"visible cmd window not found: {exc!r}")
-        return [self.shot(filename)]
+        return [self.evidence_shot(item, filename, semantic_hint=name, allow_command_window=True)]
 
     def open_secpol_account_child(self, child: str, item: dict[str, Any]) -> Any:
         win = self.open_mmc("secpol.msc", ["本地安全策略", "Local Security Policy"])
-        self.click_text(item, "secpol_account_policies", ["帐户策略", "账户策略", "Account Policies"], double=True, delay=0.6)
+        self.click_text(item, "secpol_account_policies", ["帐户策略", "账户策略", "Account Policies"], expand=True, delay=0.6)
         if child == "password":
-            self.click_text(item, "secpol_password_policy", ["密码策略", "Password Policy"], delay=1.2)
+            self.click_text(item, "secpol_password_policy", ["密码策略", "Password Policy"], double=True, delay=1.2)
         elif child == "lockout":
-            self.click_text(item, "secpol_account_lockout_policy", ["帐户锁定策略", "账户锁定策略", "Account Lockout Policy"], delay=1.2)
+            self.click_text(item, "secpol_account_lockout_policy", ["帐户锁定策略", "账户锁定策略", "Account Lockout Policy"], double=True, delay=1.2)
         else:
             raise ValueError(child)
         return self.active_window(["本地安全策略", "Local Security Policy"])
 
     def open_secpol_local_child(self, child: str, item: dict[str, Any]) -> Any:
         win = self.open_mmc("secpol.msc", ["本地安全策略", "Local Security Policy"])
-        self.click_text(item, "secpol_local_policies", ["本地策略", "Local Policies"], double=True, delay=0.6)
+        self.click_text(item, "secpol_local_policies", ["本地策略", "Local Policies"], expand=True, delay=0.6)
         if child == "audit":
-            self.click_text(item, "secpol_audit_policy", ["审核策略", "Audit Policy"], delay=1.2)
+            self.click_text(item, "secpol_audit_policy", ["审核策略", "Audit Policy"], double=True, delay=1.2)
         elif child == "security":
-            self.click_text(item, "secpol_security_options", ["安全选项", "Security Options"], delay=1.2)
+            self.click_text(item, "secpol_security_options", ["安全选项", "Security Options"], double=True, delay=1.2)
         elif child == "rights":
-            self.click_text(item, "secpol_user_rights", ["用户权限分配", "User Rights Assignment"], delay=1.2)
+            self.click_text(item, "secpol_user_rights", ["用户权限分配", "User Rights Assignment"], double=True, delay=1.2)
         else:
             raise ValueError(child)
         return self.active_window(["本地安全策略", "Local Security Policy"])
 
     def open_gpedit_computer_admin_templates(self, item: dict[str, Any], debug_prefix: str | None = None) -> Any:
         win = self.open_mmc("gpedit.msc", ["本地组策略编辑器", "Local Group Policy Editor"], wait=5)
-        self.click_text(item, "gpedit_computer_configuration", ["计算机配置", "Computer Configuration"], delay=0.8)
+        self.click_text(item, "gpedit_computer_configuration", ["计算机配置", "Computer Configuration"], double=True, delay=0.8)
         self.click_list_text(item, "gpedit_administrative_templates", ["管理模板", "Administrative Templates"], double=True, delay=0.8)
         if debug_prefix:
             self.tmp_shot(f"{debug_prefix}_admin_templates.png")
@@ -1086,7 +1322,7 @@ class Runner:
     def adaptive_open_and_capture(self, item: dict[str, Any]) -> list[str]:
         tool = str(item.get("tool") or "control").split(";")[0]
         if tool in {"cmd", "powershell"}:
-            return self.visible_cmd(item["row"], item.get("check_id") or "adaptive", ["whoami"], item["evidence"][0])
+            return self.visible_cmd(item, item.get("check_id") or "adaptive", ["whoami"], item["evidence"][0])
         if tool == "regedit":
             subprocess.Popen([r"C:\Windows\regedit.exe"])
             self.wait(3)
@@ -1110,7 +1346,7 @@ class Runner:
         else:
             subprocess.Popen(tool, shell=True)
             self.wait(3)
-        return [self.shot(item["evidence"][0])]
+        return [self.evidence_shot(item, item["evidence"][0], semantic_hint=str(item.get("gui_action") or item.get("check_id") or ""))]
 
 
 def first_evidence(item: dict[str, Any], default: str) -> str:
@@ -1124,7 +1360,7 @@ def all_evidence(item: dict[str, Any]) -> list[str]:
 
 def action_identity_users(r: Runner, item: dict[str, Any]) -> list[str]:
     return r.visible_cmd(
-        item["row"],
+        item,
         "identity_users",
         [
             "whoami",
@@ -1139,14 +1375,14 @@ def action_identity_users(r: Runner, item: dict[str, Any]) -> list[str]:
 
 def action_secpol_password_policy(r: Runner, item: dict[str, Any]) -> list[str]:
     r.open_secpol_account_child("password", item)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_secpol_password_policy.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_secpol_password_policy.png"), semantic_hint="secpol_password_policy")
     r.kill_ui()
     return [path]
 
 
 def action_secpol_account_lockout_policy(r: Runner, item: dict[str, Any]) -> list[str]:
     r.open_secpol_account_child("lockout", item)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_secpol_account_lockout_policy.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_secpol_account_lockout_policy.png"), semantic_hint="secpol_account_lockout_policy")
     r.kill_ui()
     return [path]
 
@@ -1158,22 +1394,23 @@ def action_gpedit_rdp_client_connection_encryption_level(r: Runner, item: dict[s
         r.log(f"gpedit security path failed; falling back to all settings: {exc}")
         r.open_gpedit_computer_all_settings(item)
     r.click_text(item, "gpedit_rdp_encryption_policy", ["设置客户端连接加密级别", "Set client connection encryption level", "encryption level", "加密级别", "要求使用特定的安全层"], double=True, delay=1.0, scroll_attempts=8)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_gpedit_rdp_client_connection_encryption_level.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_gpedit_rdp_client_connection_encryption_level.png"), semantic_hint="gpedit_rdp_client_connection_encryption_level")
+    r.record_delivery_result(item)
     r.kill_ui()
     return [path]
 
 
 def action_lusrmgr_users(r: Runner, item: dict[str, Any]) -> list[str]:
     win = r.open_mmc("lusrmgr.msc", ["本地用户和组", "Local Users and Groups"])
-    r.click_text(item, "lusrmgr_users_node", ["用户", "Users"], delay=1.0)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_lusrmgr_users.png"))
+    r.click_text(item, "lusrmgr_users_node", ["用户", "Users"], double=True, delay=1.0)
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_lusrmgr_users.png"), semantic_hint="lusrmgr_users")
     r.kill_ui()
     return [path]
 
 
 def action_admin_auth_method(r: Runner, item: dict[str, Any]) -> list[str]:
     return r.visible_cmd(
-        item["row"],
+        item,
         "admin_auth_method",
         [
             "whoami",
@@ -1187,8 +1424,8 @@ def action_admin_auth_method(r: Runner, item: dict[str, Any]) -> list[str]:
 
 def action_fsmgmt_shares(r: Runner, item: dict[str, Any]) -> list[str]:
     win = r.open_mmc("fsmgmt.msc", ["共享文件夹", "Shared Folders"])
-    r.click_text(item, "fsmgmt_shares_node", ["共享", "Shares"], delay=1.0)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_fsmgmt_shares.png"))
+    r.click_text(item, "fsmgmt_shares_node", ["共享", "Shares"], double=True, delay=1.0)
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_fsmgmt_shares.png"), semantic_hint="fsmgmt")
     r.kill_ui()
     return [path]
 
@@ -1202,7 +1439,7 @@ def action_regedit_lsa_restrictanonymous(r: Runner, item: dict[str, Any]) -> lis
         [["restrictanonymous"], ["restrictanonymoussam"], ["REG_DWORD", "DWORD"]],
     )
     r.wait(0.5)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_regedit_lsa_restrictanonymous.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_regedit_lsa_restrictanonymous.png"), semantic_hint="regedit_lsa_restrictanonymous")
     r.kill_ui()
     return [path]
 
@@ -1217,9 +1454,9 @@ def action_privilege_separation(r: Runner, item: dict[str, Any]) -> list[str]:
     captured: list[str] = []
 
     win = r.open_mmc("lusrmgr.msc", ["本地用户和组", "Local Users and Groups"])
-    r.click_text(item, "lusrmgr_groups_node", ["组", "Groups"], delay=0.6)
+    r.click_text(item, "lusrmgr_groups_node", ["组", "Groups"], double=True, delay=0.6)
     r.keyboard_search_list_item(item, "lusrmgr_administrators_group", "Administrators", enter=True, tabs=1, delay=1.0)
-    captured.append(r.shot(names[0]))
+    captured.append(r.evidence_shot(item, names[0], semantic_hint="lusrmgr_administrators_members"))
     r.kill_ui()
 
     if len(names) > 1:
@@ -1233,7 +1470,7 @@ def action_privilege_separation(r: Runner, item: dict[str, Any]) -> list[str]:
         r.wait(1.0)
         pyautogui.hotkey("ctrl", "tab")
         r.wait(0.5)
-        captured.append(r.shot(names[1]))
+        captured.append(r.evidence_shot(item, names[1], semantic_hint="services"))
         r.kill_ui()
     return captured
 
@@ -1247,14 +1484,20 @@ def action_lusrmgr_default_accounts(r: Runner, item: dict[str, Any]) -> list[str
         ]
     captured: list[str] = []
     win = r.open_mmc("lusrmgr.msc", ["本地用户和组", "Local Users and Groups"])
-    r.click_text(item, "lusrmgr_users_node", ["用户", "Users"], delay=1.0)
+    r.click_text(item, "lusrmgr_users_node", ["用户", "Users"], double=True, delay=1.0)
     r.set_listview_column_widths("lusrmgr_default_accounts_columns", [240, 160, 320])
+    row_text = " ".join(r.item_keywords(item)).casefold()
+    required_accounts = [["Administrator"], ["Guest"]]
+    if "defaultaccount" in row_text:
+        required_accounts.append(["DefaultAccount"])
+    if "wdagutilityaccount" in row_text:
+        required_accounts.append(["WDAGUtilityAccount"])
     r.require_visible_token_groups(
         item,
         "lusrmgr_default_accounts_visible",
-        [["Administrator"], ["DefaultAccount"], ["Guest"], ["WDAGUtilityAccount"]],
+        required_accounts,
     )
-    captured.append(r.shot(names[0]))
+    captured.append(r.evidence_shot(item, names[0], semantic_hint="lusrmgr_default_accounts"))
     if len(names) > 1:
         r.keyboard_search_list_item(item, "lusrmgr_guest_account", "Guest", enter=True, tabs=1, delay=1.0)
         r.require_visible_token_groups(
@@ -1262,7 +1505,7 @@ def action_lusrmgr_default_accounts(r: Runner, item: dict[str, Any]) -> list[str
             "lusrmgr_guest_properties_disabled_visible",
             [["Guest"], ["属性", "Properties"], ["账户已禁用", "帐户已禁用", "Account is disabled"]],
         )
-        captured.append(r.shot(names[1]))
+        captured.append(r.evidence_shot(item, names[1], semantic_hint="lusrmgr_guest_properties_disabled"))
     r.kill_ui()
     return captured
 
@@ -1273,7 +1516,7 @@ def action_lusrmgr_extra_accounts(r: Runner, item: dict[str, Any]) -> list[str]:
 
 def action_secpol_audit_policy(r: Runner, item: dict[str, Any]) -> list[str]:
     r.open_secpol_local_child("audit", item)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_secpol_audit_policy.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_secpol_audit_policy.png"), semantic_hint="secpol_audit_policy")
     r.kill_ui()
     return [path]
 
@@ -1283,7 +1526,7 @@ def action_eventvwr_system_log(r: Runner, item: dict[str, Any]) -> list[str]:
     subprocess.Popen([r"C:\Windows\System32\mmc.exe", "eventvwr.msc", "/c:System"])
     r.wait(6.0)
     r.maximize(r.wait_window(["事件查看器", "Event Viewer"], 25))
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_eventvwr_system_log.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_eventvwr_system_log.png"), semantic_hint="eventvwr")
     r.kill_ui()
     return [path]
 
@@ -1294,7 +1537,7 @@ def action_eventvwr_system_log_properties(r: Runner, item: dict[str, Any]) -> li
     r.wait(6.0)
     win = r.maximize(r.wait_window(["事件查看器", "Event Viewer"], 25))
     r.click_text(item, "eventvwr_system_properties", ["属性", "Properties"], delay=1.0)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_eventvwr_system_log_properties.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_eventvwr_system_log_properties.png"), semantic_hint="eventvwr_system_log_properties")
     r.kill_ui()
     return [path]
 
@@ -1304,22 +1547,11 @@ def action_control_installed_updates(r: Runner, item: dict[str, Any]) -> list[st
     tokens = ["已安装更新", "Installed Updates"]
     titles = ["已安装更新", "Installed Updates", "程序和功能", "Programs and Features"]
 
-    try:
-        subprocess.Popen(
-            [
-                r"C:\Windows\System32\rundll32.exe",
-                "shell32.dll,Control_RunDLL",
-                "appwiz.cpl,,2",
-            ]
-        )
-        r.wait(5.0)
-        win = r.maximize(r.wait_window(titles, 10))
-    except Exception as exc:
-        r.log(f"direct installed-updates route failed: {exc!r}; falling back to appwiz link")
-        r.kill_ui()
-        subprocess.Popen([r"C:\Windows\System32\control.exe", "appwiz.cpl"])
-        r.wait(5.0)
-        win = r.maximize(r.wait_window(titles, 25))
+    # Do not use appwiz.cpl,,2 here: on Server 2012 it can route to the
+    # Windows Features page and trigger a missing OptionalFeatures.exe dialog.
+    subprocess.Popen([r"C:\Windows\System32\control.exe", "appwiz.cpl"])
+    r.wait(5.0)
+    win = r.maximize(r.wait_window(titles, 25))
 
     if not r.control_panel_location_has(win, tokens):
         # Server 2012 often opens Programs and Features first; use the left
@@ -1329,8 +1561,17 @@ def action_control_installed_updates(r: Runner, item: dict[str, Any]) -> list[st
 
     if not r.control_panel_location_has(win, tokens):
         raise RuntimeError("Programs and Features did not navigate to Installed Updates")
+    r.require_visible_token_groups(
+        item,
+        "control_installed_updates_visible",
+        [
+            ["已安装更新", "已安装的更新", "Installed Updates"],
+            ["KB", "Microsoft Windows", "Update for Microsoft Windows", "Security Update", "更新"],
+        ],
+    )
 
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_control_installed_updates.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_control_installed_updates.png"), semantic_hint="control_installed_updates")
+    r.record_delivery_result(item)
     r.kill_ui()
     return [path]
 
@@ -1338,7 +1579,8 @@ def action_control_installed_updates(r: Runner, item: dict[str, Any]) -> list[st
 def action_services_remote_registry(r: Runner, item: dict[str, Any]) -> list[str]:
     win = r.open_mmc("services.msc", ["服务", "Services"])
     r.click_text(item, "services_remote_registry", ["Remote Registry"], delay=1.0)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_services_remote_registry.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_services_remote_registry.png"), semantic_hint="services_remote_registry")
+    r.record_delivery_result(item)
     r.kill_ui()
     return [path]
 
@@ -1346,7 +1588,7 @@ def action_services_remote_registry(r: Runner, item: dict[str, Any]) -> list[str
 def action_gpedit_idle_session_limit(r: Runner, item: dict[str, Any]) -> list[str]:
     r.open_gpedit_computer_rdsh("session_time_limits", item)
     r.click_text(item, "gpedit_idle_session_policy", ["设置活动但空闲的远程桌面服务会话的时间限制", "活动但空闲", "空闲", "Set time limit for active but idle", "idle session"], double=True, delay=1.0, scroll_attempts=8)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_gpedit_idle_session_limit.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_gpedit_idle_session_limit.png"), semantic_hint="gpedit_idle_session_limit")
     r.kill_ui()
     return [path]
 
@@ -1359,14 +1601,14 @@ def action_gpedit_limit_number_of_connections(r: Runner, item: dict[str, Any]) -
         r.log(f"gpedit connections path failed; falling back to all settings: {exc}")
         r.open_gpedit_computer_all_settings(item)
         r.click_text(item, "gpedit_limit_connections_policy_all_settings", ["限制连接的数量", "Limit number of connections", "MaxInstanceCount"], double=True, delay=1.0, scroll_attempts=8)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_gpedit_limit_number_of_connections.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_gpedit_limit_number_of_connections.png"), semantic_hint="gpedit_limit_number_of_connections")
     r.kill_ui()
     return [path]
 
 
 def action_secpol_security_options(r: Runner, item: dict[str, Any]) -> list[str]:
     r.open_secpol_local_child("security", item)
-    path = r.shot(first_evidence(item, f"row{item['row']:02d}_secpol_security_options.png"))
+    path = r.evidence_shot(item, first_evidence(item, f"row{item['row']:02d}_secpol_security_options.png"), semantic_hint="secpol_security_options")
     r.kill_ui()
     return [path]
 
@@ -1408,6 +1650,21 @@ def run_plan(plan_path: Path, out_dir: Path, only_row: int | None = None, debug:
         if only_row is not None and item["row"] != only_row:
             continue
         action_name = item.get("gui_action") or "adaptive_gui"
+        if action_name == "skip_admin_interview" or item.get("check_id") == "admin_interview":
+            runner.log(f"skip row={item['row']} reason=administrator_interview")
+            results.append(
+                {
+                    "row": item["row"],
+                    "status": "skipped",
+                    "skip_reason": "administrator_interview",
+                    "action": action_name,
+                    "lane": item.get("lane"),
+                    "finding": item.get("finding") or ADMIN_INTERVIEW_FINDING,
+                    "result": item.get("result") or ADMIN_INTERVIEW_RESULT,
+                    "evidence": [],
+                }
+            )
+            continue
         action = ACTIONS.get(action_name, action_adaptive_gui)
         try:
             runner.log(f"start row={item['row']} action={action_name} lane={item.get('lane')}")
@@ -1419,12 +1676,18 @@ def run_plan(plan_path: Path, out_dir: Path, only_row: int | None = None, debug:
                     "action": action_name,
                     "lane": item.get("lane"),
                     "evidence": [Path(path).name for path in evidence_paths],
+                    **runner.delivery_results.get(int(item["row"]), {}),
                 }
             )
             runner.log(f"done row={item['row']} evidence={evidence_paths}")
         except Exception as exc:
             runner.log(f"ERROR row={item.get('row')} action={action_name}: {type(exc).__name__}: {exc}")
-            status = "validation_failed" if isinstance(exc, EvidenceValidationError) else "error"
+            if isinstance(exc, UserConfirmationRequiredError):
+                status = "needs_user_confirmation"
+            elif isinstance(exc, EvidenceValidationError):
+                status = "validation_failed"
+            else:
+                status = "error"
             try:
                 error_name = f"row{int(item['row']):02d}_error_{action_name}.png"
                 error_path = runner.tmp_shot(error_name)

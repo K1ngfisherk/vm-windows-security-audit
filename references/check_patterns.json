@@ -4,11 +4,11 @@
     "match": {
       "any": ["身份标识", "口令鉴别", "空密码", "登录验证"]
     },
-    "tool": "cmd",
-    "gui_action": "identity_users",
+    "tool": "lusrmgr.msc",
+    "gui_action": "lusrmgr_users",
     "evidence_slug": "identity_users",
     "graphical_required": true,
-    "notes": "Show the logged-in account and local user list or equivalent graphical/visible proof."
+    "notes": "Use native Windows GUI evidence such as Local Users and Groups. Do not use command-window screenshots unless the user explicitly authorizes that evidence type."
   },
   {
     "id": "password_policy",
@@ -60,11 +60,11 @@
     "match": {
       "any": ["组合的鉴别技术", "两种或两种以上", "管理用户", "身份鉴别"]
     },
-    "tool": "cmd",
+    "tool": "native_gui_required",
     "gui_action": "admin_auth_method",
     "evidence_slug": "admin_auth_method",
-    "graphical_required": false,
-    "notes": "If the row is interview-only, collect visible session/account proof and state the limitation."
+    "graphical_required": true,
+    "notes": "If the row involves interviewing an administrator, do not operate; write 检查情况=涉及访谈管理员，未进行操作 and 结果=未检查. If no native GUI proof exists, stop and ask the user before using command-window evidence."
   },
   {
     "id": "default_shares",

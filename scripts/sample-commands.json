@@ -1,0 +1,14 @@
+﻿[
+  {
+    "id": "row05",
+    "name": "passwd-shadow-empty-password-check",
+    "command": "clear; echo 'ROW 05 auth password and empty password'; echo 'COMMAND: cat /etc/passwd; shadow status'; cat /etc/passwd; echo '--- shadow status ---'; awk -F: '{if($2==\"\") s=\"EMPTY\"; else if($2 ~ /^[!*]/) s=\"LOCKED\"; else s=\"SET\"; print $1\":\"s}' /etc/shadow; echo 'END ROW 05'",
+    "waitSeconds": 2
+  },
+  {
+    "id": "row06",
+    "name": "login-defs-password-policy",
+    "command": "clear; echo 'ROW 06 password policy'; echo 'COMMAND: grep PASS_* /etc/login.defs'; grep -E '^\\s*PASS_(MAX_DAYS|MIN_DAYS|MIN_LEN|WARN_AGE)' /etc/login.defs; echo 'END ROW 06'",
+    "waitSeconds": 2
+  }
+]

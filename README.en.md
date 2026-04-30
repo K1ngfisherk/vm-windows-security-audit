@@ -1,82 +1,65 @@
-# VM Windows Security Audit Skill
+# Security Baseline Assessment Project
 
 [中文](README.md)
 
-`vm-windows-security-audit` audits Windows VMware virtual machines against Windows security checklist spreadsheets. It reads an `.xlsx` checklist, opens the corresponding Windows management interfaces inside the VM, captures row-level screenshot evidence, and can optionally generate an Excel report with embedded screenshots.
+This project supports security baseline assessments for common targets such as Windows, Linux/Unix, and database services. It works around security checklists, organizes assessment results, and produces reports and evidence materials.
 
-## Use Cases
+## Overview
 
-- Windows Server security baseline checks.
-- Spreadsheet-driven audit tasks that require screenshot evidence.
-- Windows system checks inside VMware Workstation virtual machines.
-- Reviews where original GUI evidence is preferred over command-only output.
+The project can help review account policies, access control, audit settings, services and ports, remote management, database configuration, and related baseline items.
 
-## Features
+It is useful for security baseline assessments, coursework, review and acceptance work, operations self-checks, and before/after hardening records.
 
-- Analyze `.xlsx` checklists and identify check items, expected results, and operation guidance.
-- Support common Windows management surfaces, including Local Security Policy, Group Policy, Local Users and Groups, Services, Event Viewer, Shared Folders, Registry Editor, and Control Panel.
-- Save row-level evidence with stable names such as `row11_gpedit_rdp_client_connection_encryption_level.png`.
-- Perform basic screenshot usability and page-content checks to reduce mismatched evidence.
-- Support offline preparation of Python and GUI automation dependencies inside the VM.
-- Optionally generate an Excel report with screenshots embedded into the result column.
+## Supported Targets
 
-## Before You Start
-
-Host requirements:
-
-- Windows host.
-- VMware Workstation or compatible `vmrun.exe`.
-- Access to the target VM `.vmx` file.
-- Access to the source checklist `.xlsx`.
-- Microsoft Excel if an embedded-image Excel report is required.
-
-Guest requirements:
-
-- Windows guest system.
-- VMware Tools running.
-- Logged-in desktop session.
-- Guest username and password for the audit.
-
-## Workflow
-
-1. Read the checklist and build an audit plan.
-2. Check the VM environment and desktop state.
-3. Prepare the runtime inside the guest.
-4. Open the corresponding Windows management interface for each row.
-5. Capture and validate screenshot evidence.
-6. Save final screenshots.
-7. Generate an Excel report if requested.
+- Windows Server virtual machines
+- Linux/Unix hosts
+- Database services running in Docker
+- Common MySQL/MariaDB scenarios
 
 ## Outputs
 
-By default, outputs are written next to the source workbook and include the task label in their names.
+Typical outputs include:
+
+- Excel security assessment reports
+- Screenshot evidence folders
+- Command output or assessment records
+- Result summaries for each target
+
+Example output:
 
 ```text
-Windows完整检查_<task_label>_证据\
-<source_workbook_stem>_<task_label>.xlsx
+centos安全检查报告.xlsx
+centos安全检查证据\
 ```
 
-Screenshot naming format:
+Screenshot files use short names for easier review and archiving, for example:
 
 ```text
-rowNN_<tool>_<check_key>.png
+row05_身份鉴别.png
+row06_口令策略.png
+row22_服务端口.png
+row24_超时锁定.png
 ```
 
-The final evidence directory mainly contains deliverable screenshot files. Report workbooks are created only when requested.
+## Highlights
 
-## Current Coverage
+- Windows GUI assessment support.
+- Linux/Unix SSH assessment support.
+- Basic database service security checks.
+- Excel report generation.
+- Screenshot evidence collection.
+- Key-evidence summaries for long command output.
 
-Built-in checks currently cover:
+## Typical Use Cases
 
-- Local Security Policy: password policy, account lockout policy, audit policy, and security options.
-- Group Policy: Remote Desktop encryption level, idle session limit, and connection limit.
-- Local Users and Groups: user lists, default accounts, Guest properties, and Administrators membership.
-- Services: Remote Registry and other service settings.
-- Event Viewer: System log and properties pages.
-- Shared Folders, LSA registry values, and Installed Updates.
-- Helper checks that display identity or administrator authentication details in a visible window.
+- Checking server configurations against a baseline checklist.
+- Producing consistent reports for multiple virtual machines.
+- Preparing materials for security courses, labs, or assignments.
+- Comparing system state before and after hardening.
+- Preparing screenshots for review, acceptance, or archiving.
 
-## Layout
+## Project Layout
 
 ```text
 vm-windows-security-audit/
@@ -88,9 +71,3 @@ vm-windows-security-audit/
 ├── references/
 └── scripts/
 ```
-
-## Notes
-
-- The source checklist is not modified directly.
-- Excel reports, hyperlinks, and zip packages are optional outputs.
-- Some GUI paths may need adaptation for different Windows versions, languages, or display scaling.
